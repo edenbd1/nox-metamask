@@ -1,20 +1,152 @@
-diff --git a/shared/constants/app-state.ts b/shared/constants/app-state.ts
-index fd4eb75..89e0bbf 100644
---- a/shared/constants/app-state.ts
-+++ b/shared/constants/app-state.ts
-@@ -16,12 +16,15 @@ export type AccountOverviewTab = `${AccountOverviewTabKey}`;
+diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
+index 89fb982..24b1a59 100644
+--- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
++++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
+@@ -28,15 +28,53 @@ import {
+ } from './nox-rpc';
+ import { noxDecrypt } from './nox-client';
  
- export const ACCOUNT_OVERVIEW_TAB_KEY_TO_METAMETRICS_EVENT_NAME_MAP = {
-   [AccountOverviewTabKey.Tokens]: MetaMetricsEventName.TokenScreenOpened,
-+  [AccountOverviewTabKey.PrivateBalance]: MetaMetricsEventName.TokenScreenOpened,
-   [AccountOverviewTabKey.DeFi]: MetaMetricsEventName.DeFiScreenOpened,
-   [AccountOverviewTabKey.Activity]: MetaMetricsEventName.ActivityScreenOpened,
- } as const;
+-// Module-level cache: survives component unmount/remount. The side-panel UI
+-// unmounts the tab when the EIP-712 signature popup steals focus, so any
+-// state stored in useState is lost by the time the user clicks back. We key
+-// by user+handle so the decrypted plaintext is stable across navigations.
+-const decryptCache = new Map<string, bigint>();
++// chrome.storage.session cache: survives side-panel remount within the same
++// browser session (wiped on browser close). The side panel is destroyed and
++// recreated when the EIP-712 signature popup takes focus, so a module-level
++// Map doesn't survive — we need real persistent storage but session-scoped
++// because the decrypted plaintext is sensitive.
++//
++// In-memory hot cache avoids an async round-trip on every render.
++const hotCache = new Map<string, bigint>();
+ const inflightDecrypts = new Map<string, Promise<bigint>>();
  
- export const ACCOUNT_OVERVIEW_TAB_KEY_TO_TRACE_NAME_MAP = {
-   [AccountOverviewTabKey.Tokens]: TraceName.AccountOverviewAssetListTab,
-+  // Reuse the Tokens trace name — PoC, no new metric needed
-+  [AccountOverviewTabKey.PrivateBalance]: TraceName.AccountOverviewAssetListTab,
-   [AccountOverviewTabKey.Nfts]: TraceName.AccountOverviewNftsTab,
-   [AccountOverviewTabKey.Activity]: TraceName.AccountOverviewActivityTab,
-   [AccountOverviewTabKey.DeFi]: TraceName.AccountOverviewDeFiTab,
+ const cacheKey = (user: string, handle: string) =>
+-  `${user.toLowerCase()}|${handle.toLowerCase()}`;
++  `nox:decrypt:${user.toLowerCase()}|${handle.toLowerCase()}`;
++
++type SessionStorageArea = {
++  get(keys: string | string[]): Promise<Record<string, unknown>>;
++  set(items: Record<string, unknown>): Promise<void>;
++};
++
++function getSessionStorage(): SessionStorageArea | null {
++  const chromeRef = (globalThis as { chrome?: { storage?: { session?: SessionStorageArea } } }).chrome;
++  return chromeRef?.storage?.session ?? null;
++}
++
++async function loadCachedValue(key: string): Promise<bigint | undefined> {
++  if (hotCache.has(key)) return hotCache.get(key);
++  const storage = getSessionStorage();
++  if (!storage) return undefined;
++  try {
++    const out = await storage.get(key);
++    const raw = out[key];
++    if (typeof raw === 'string') {
++      const v = BigInt(raw);
++      hotCache.set(key, v);
++      return v;
++    }
++  } catch { /* noop */ }
++  return undefined;
++}
++
++async function saveCachedValue(key: string, value: bigint): Promise<void> {
++  hotCache.set(key, value);
++  const storage = getSessionStorage();
++  if (!storage) return;
++  try {
++    await storage.set({ [key]: value.toString() });
++  } catch { /* noop */ }
++}
+ 
+ // Known ERC-7984 confidential tokens on Arbitrum Sepolia (chainId 421614).
+ // Today there's no public ERC-7984 registry, so this list is curated; we
+@@ -260,15 +298,33 @@ export default function PrivateBalanceTab() {
+       for (const token of NOX_CTOKENS) {
+         try {
+           const { handle, zero } = await fetchBalanceHandle(token.address, ownerAddress);
+-          if (!cancelled) {
+-            setLoads((prev) => ({ ...prev, [token.address]: { status: 'ok', handle, zero } }));
+-            if (!zero) {
+-              const cached = decryptCache.get(cacheKey(ownerAddress, handle));
+-              if (cached !== undefined) {
+-                setReveals((prev) => ({
+-                  ...prev,
+-                  [token.address]: { status: 'ok', value: cached },
+-                }));
++          if (cancelled) return;
++          setLoads((prev) => ({ ...prev, [token.address]: { status: 'ok', handle, zero } }));
++          if (!zero) {
++            // Rehydrate plaintext from session storage if we decrypted this
++            // handle already (survives side-panel remount after signing).
++            const key = cacheKey(ownerAddress, handle);
++            const cached = await loadCachedValue(key);
++            console.log('[nox] rehydrate check', { key, hit: cached !== undefined });
++            if (cached !== undefined && !cancelled) {
++              setReveals((prev) => ({
++                ...prev,
++                [token.address]: { status: 'ok', value: cached },
++              }));
++            } else {
++              // Surface any persisted error from a previous failed decrypt
++              const storage = getSessionStorage();
++              if (storage) {
++                try {
++                  const out = await storage.get(`${key}:error`);
++                  const errMsg = out[`${key}:error`];
++                  if (typeof errMsg === 'string' && !cancelled) {
++                    setReveals((prev) => ({
++                      ...prev,
++                      [token.address]: { status: 'error', message: errMsg },
++                    }));
++                  }
++                } catch { /* noop */ }
+               }
+             }
+           }
+@@ -293,9 +349,8 @@ export default function PrivateBalanceTab() {
+ 
+       const key = cacheKey(ownerAddress, load.handle);
+ 
+-      // Fast-path: already decrypted this handle before (e.g. user navigated
+-      // away while the signature popup was open and came back).
+-      const cached = decryptCache.get(key);
++      // Fast-path: already decrypted this handle before in this session.
++      const cached = await loadCachedValue(key);
+       if (cached !== undefined) {
+         setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value: cached } }));
+         return;
+@@ -303,11 +358,15 @@ export default function PrivateBalanceTab() {
+ 
+       setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'signing' } }));
+       try {
+-        // De-dupe: if a decrypt for this handle is already in flight, await it.
++        console.log('[nox] revealToken start', { tokenAddress, handle: load.handle });
++        // De-dupe concurrent reveals. Persist to session storage INSIDE the
++        // promise chain so the value is available even if our setReveals call
++        // happens on an unmounted side panel.
+         let pending = inflightDecrypts.get(key);
+         if (!pending) {
+-          pending = noxDecrypt(ownerAddress, load.handle).then((v) => {
+-            decryptCache.set(key, v);
++          pending = noxDecrypt(ownerAddress, load.handle).then(async (v) => {
++            console.log('[nox] decrypt resolved, saving to session', { key, value: v.toString() });
++            await saveCachedValue(key, v);
+             return v;
+           }).finally(() => {
+             inflightDecrypts.delete(key);
+@@ -317,6 +376,13 @@ export default function PrivateBalanceTab() {
+         const value = await pending;
+         setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value } }));
+       } catch (err) {
++        console.error('[nox] revealToken failed', err);
++        // Also persist the error so if the side panel remounts, we can show
++        // the user what went wrong instead of silently reverting to ********.
++        const storage = getSessionStorage();
++        if (storage) {
++          try { await storage.set({ [`${key}:error`]: (err as Error).message }); } catch { /* noop */ }
++        }
+         setReveals((prev) => ({
+           ...prev,
+           [tokenAddress]: { status: 'error', message: (err as Error).message },
