@@ -1,0 +1,261 @@
+diff --git a/shared/constants/app-state.ts b/shared/constants/app-state.ts
+index b56a68c..fd4eb75 100644
+--- a/shared/constants/app-state.ts
++++ b/shared/constants/app-state.ts
+@@ -5,6 +5,7 @@ import { MetaMetricsEventName } from './metametrics';
+ 
+ export enum AccountOverviewTabKey {
+   Tokens = 'tokens',
++  PrivateBalance = 'private-balance',
+   Nfts = 'nfts',
+   Activity = 'activity',
+   DeFi = 'defi',
+diff --git a/ui/components/app/assets/private-balance-tab/index.ts b/ui/components/app/assets/private-balance-tab/index.ts
+new file mode 100644
+index 0000000..1ddc791
+--- /dev/null
++++ b/ui/components/app/assets/private-balance-tab/index.ts
+@@ -0,0 +1 @@
++export { default } from './private-balance-tab';
+diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
+new file mode 100644
+index 0000000..29586fb
+--- /dev/null
++++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
+@@ -0,0 +1,177 @@
++import React, { useState } from 'react';
++import {
++  Box,
++  Button,
++  ButtonSize,
++  ButtonVariant,
++  Icon,
++  IconName,
++  IconSize,
++  Text,
++} from '../../../component-library';
++import {
++  AlignItems,
++  BackgroundColor,
++  BorderColor,
++  BorderRadius,
++  Display,
++  FlexDirection,
++  JustifyContent,
++  TextColor,
++  TextVariant,
++} from '../../../../helpers/constants/design-system';
++
++const NOX_CTOKENS = [
++  {
++    address: '0x52a12dC4558063AB2a451f52DA721F24Cae72DeC',
++    symbol: 'cUSDC',
++    name: 'Confidential USDC',
++    network: 'Arbitrum Sepolia',
++    underlying: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
++    underlyingSymbol: 'USDC',
++    decimals: 6,
++  },
++];
++
++function MaskedAmount({ revealed, value, symbol }: { revealed: boolean; value: string; symbol: string }) {
++  return (
++    <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++      Revealed: <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textDefault}>
++        {revealed ? value : '********'} {symbol}
++      </Text>
++    </Text>
++  );
++}
++
++function CTokenCard({
++  token,
++  revealed,
++  onDecrypt,
++}: {
++  token: typeof NOX_CTOKENS[number];
++  revealed: boolean;
++  onDecrypt: () => void;
++}) {
++  return (
++    <Box
++      padding={4}
++      borderColor={BorderColor.borderMuted}
++      borderRadius={BorderRadius.LG}
++      marginBottom={2}
++      display={Display.Flex}
++      flexDirection={FlexDirection.Column}
++      gap={2}
++    >
++      <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
++        <Box
++          display={Display.Flex}
++          alignItems={AlignItems.center}
++          justifyContent={JustifyContent.center}
++          backgroundColor={BackgroundColor.infoMuted}
++          borderRadius={BorderRadius.full}
++          style={{ width: 32, height: 32, position: 'relative' }}
++        >
++          <Text variant={TextVariant.bodyMdMedium} color={TextColor.infoDefault}>$</Text>
++          <Box
++            display={Display.Flex}
++            alignItems={AlignItems.center}
++            justifyContent={JustifyContent.center}
++            backgroundColor={BackgroundColor.backgroundDefault}
++            borderRadius={BorderRadius.full}
++            style={{ position: 'absolute', bottom: -2, right: -2, width: 14, height: 14 }}
++          >
++            <Icon name={IconName.Lock} size={IconSize.Xs} color={TextColor.iconAlternative} />
++          </Box>
++        </Box>
++        <Box display={Display.Flex} flexDirection={FlexDirection.Column}>
++          <Text variant={TextVariant.bodyMdMedium}>
++            {token.symbol} · {token.network}
++          </Text>
++        </Box>
++      </Box>
++
++      <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++        On-chain balance is encrypted.
++      </Text>
++
++      <MaskedAmount revealed={revealed} value="— " symbol={token.symbol} />
++
++      <Box display={Display.Flex} gap={2}>
++        <Button
++          variant={ButtonVariant.Secondary}
++          size={ButtonSize.Sm}
++          startIconName={IconName.Arrow2UpRight}
++          disabled
++        >
++          Send
++        </Button>
++        <Button
++          variant={ButtonVariant.Secondary}
++          size={ButtonSize.Sm}
++          startIconName={IconName.ShieldLock}
++          disabled
++        >
++          Shield
++        </Button>
++        <Button
++          variant={ButtonVariant.Link}
++          size={ButtonSize.Sm}
++          onClick={onDecrypt}
++        >
++          {revealed ? 'Hide' : 'Decrypt'}
++        </Button>
++      </Box>
++    </Box>
++  );
++}
++
++export default function PrivateBalanceTab() {
++  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
++  const allRevealed = NOX_CTOKENS.every((t) => revealed[t.address]);
++
++  const toggleAll = () => {
++    const next: Record<string, boolean> = {};
++    NOX_CTOKENS.forEach((t) => { next[t.address] = !allRevealed; });
++    setRevealed(next);
++  };
++
++  return (
++    <Box padding={4}>
++      <Box
++        display={Display.Flex}
++        justifyContent={JustifyContent.spaceBetween}
++        alignItems={AlignItems.center}
++        marginBottom={3}
++      >
++        <Text variant={TextVariant.bodyMdMedium}>Confidential tokens</Text>
++        <Button
++          variant={ButtonVariant.Primary}
++          size={ButtonSize.Sm}
++          startIconName={allRevealed ? IconName.EyeSlash : IconName.Eye}
++          onClick={toggleAll}
++        >
++          {allRevealed ? 'Hide all' : 'Decrypt all'}
++        </Button>
++      </Box>
++
++      {NOX_CTOKENS.map((token) => (
++        <CTokenCard
++          key={token.address}
++          token={token}
++          revealed={Boolean(revealed[token.address])}
++          onDecrypt={() =>
++            setRevealed((prev) => ({ ...prev, [token.address]: !prev[token.address] }))
++          }
++        />
++      ))}
++
++      <Box marginTop={4}>
++        <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
++          Powered by Nox Protocol · ERC-7984 · Balances are end-to-end encrypted
++          in a Trusted Execution Environment. Decryption is gasless (EIP-712
++          signature).
++        </Text>
++      </Box>
++    </Box>
++  );
++}
+diff --git a/ui/components/multichain/account-overview/account-overview-eth.tsx b/ui/components/multichain/account-overview/account-overview-eth.tsx
+index 75795f9..db7fef4 100644
+--- a/ui/components/multichain/account-overview/account-overview-eth.tsx
++++ b/ui/components/multichain/account-overview/account-overview-eth.tsx
+@@ -12,6 +12,7 @@ export const AccountOverviewEth = (props: AccountOverviewEthProps) => {
+   return (
+     <AccountOverviewLayout
+       showTokens={true}
++      showPrivateBalance={true}
+       showNfts={true}
+       showDefi={defiPositionsEnabled}
+       showActivity={true}
+diff --git a/ui/components/multichain/account-overview/account-overview-tabs.tsx b/ui/components/multichain/account-overview/account-overview-tabs.tsx
+index b66beb3..c695684 100644
+--- a/ui/components/multichain/account-overview/account-overview-tabs.tsx
++++ b/ui/components/multichain/account-overview/account-overview-tabs.tsx
+@@ -30,6 +30,7 @@ import {
+ import AssetList from '../../app/assets/asset-list';
+ import DeFiTab from '../../app/assets/defi-list/defi-tab';
+ import NftsTab from '../../app/assets/nfts/nfts-tab';
++import PrivateBalanceTab from '../../app/assets/private-balance-tab';
+ import { PerpsView } from '../../app/perps/perps-view';
+ import { PerpsViewStreamBoundary } from '../../app/perps/perps-view-stream-boundary';
+ import { PerpsToastProvider } from '../../app/perps/perps-toast';
+@@ -46,6 +47,7 @@ export type AccountOverviewTabsProps = AccountOverviewCommonProps & {
+   showNfts: boolean;
+   showActivity: boolean;
+   showDefi?: boolean;
++  showPrivateBalance?: boolean;
+ };
+ 
+ export const AccountOverviewTabs = ({
+@@ -54,6 +56,7 @@ export const AccountOverviewTabs = ({
+   showNfts,
+   showActivity,
+   showDefi,
++  showPrivateBalance,
+ }: AccountOverviewTabsProps) => {
+   const persistedTab = useSelector(getDefaultHomeActiveTabName);
+   const [urlTab, setActiveTabKey] = useTabState();
+@@ -173,6 +176,18 @@ export const AccountOverviewTabs = ({
+         </Tab>
+       )}
+ 
++      {showPrivateBalance && (
++        <Tab
++          name="Private balance"
++          tabKey={AccountOverviewTabKey.PrivateBalance}
++          data-testid="account-overview__private-balance-tab"
++        >
++          <ErrorBoundary key="private-balance">
++            <PrivateBalanceTab />
++          </ErrorBoundary>
++        </Tab>
++      )}
++
+       {isPerpsExperienceAvailable && (
+         <Tab
+           name={t('perps')}
