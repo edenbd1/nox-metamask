@@ -1,3 +1,39 @@
+diff --git a/app/scripts/metamask-controller.js b/app/scripts/metamask-controller.js
+index bab8784..b1fd6f7 100644
+--- a/app/scripts/metamask-controller.js
++++ b/app/scripts/metamask-controller.js
+@@ -3840,6 +3840,31 @@ export default class MetamaskController extends EventEmitter {
+         }),
+       lookupSelectedNetworks: this.lookupSelectedNetworks.bind(this),
+       resetWallet: this.resetWallet.bind(this),
++
++      // Nox — Confidential tokens (iExec). Exposes a UI-originated EIP-712
++      // typed-data signing so the Private Balance tab can run the gasless
++      // user-decrypt flow against the Nox Handle Gateway without deep-linking
++      // to an external dApp. This wraps SignatureController in the same way
++      // eth_signTypedData_v4 coming from a dApp would, but with origin
++      // 'metamask' so no permission dialog is skipped.
++      noxSignTypedDataV4: async (typedData, from) => {
++        const serialized =
++          typeof typedData === 'string'
++            ? typedData
++            : JSON.stringify(typedData);
++        return this.signatureController.newUnsignedTypedMessage(
++          { data: serialized, from },
++          {
++            id: Date.now(),
++            method: 'eth_signTypedData_v4',
++            params: [from, serialized],
++            origin: ORIGIN_METAMASK,
++            networkClientId:
++              this.networkController.state.selectedNetworkClientId,
++          },
++          'V4',
++        );
++      },
+     };
+   }
+ 
 diff --git a/shared/constants/app-state.ts b/shared/constants/app-state.ts
 index b56a68c..fd4eb75 100644
 --- a/shared/constants/app-state.ts
@@ -17,6 +53,208 @@ index 0000000..1ddc791
 +++ b/ui/components/app/assets/private-balance-tab/index.ts
 @@ -0,0 +1 @@
 +export { default } from './private-balance-tab';
+diff --git a/ui/components/app/assets/private-balance-tab/nox-client.ts b/ui/components/app/assets/private-balance-tab/nox-client.ts
+new file mode 100644
+index 0000000..9211ae2
+--- /dev/null
++++ b/ui/components/app/assets/private-balance-tab/nox-client.ts
+@@ -0,0 +1,196 @@
++// Self-contained Nox Handle Gateway client for the MetaMask Private Balance
++// tab. Re-implements @iexec-nox/handle's `decrypt()` flow using Web Crypto API
++// so nothing needs to be bundled into the extension sandbox.
++//
++// Chain config is hardcoded for Arbitrum Sepolia (chainId 421614).
++
++import { noxSignTypedDataV4 } from '../../../../store/actions';
++
++const HANDLE_GATEWAY =
++  'https://2e1800fc0dddeeadc189283ed1dce13c1ae28d48-3000.apps.ovh-tdx-dev.noxprotocol.dev';
++const NOX_COMPUTE = '0xd464B198f06756a1d00be223634b85E0a731c229';
++const CHAIN_ID = 421614;
++
++const DERIVATION_INFO = new Uint8Array([
++  0x45, 0x43, 0x49, 0x45, 0x53, 0x3a, 0x41, 0x45, 0x53, 0x5f, 0x47, 0x43, 0x4d,
++  0x3a, 0x76, 0x31,
++]); // "ECIES:AES_GCM:v1"
++
++function bytesToHex(bytes: Uint8Array): string {
++  let out = '0x';
++  for (const b of bytes) out += b.toString(16).padStart(2, '0');
++  return out;
++}
++
++function hexToBytes(hex: string): Uint8Array {
++  const clean = hex.replace(/^0x/, '');
++  const out = new Uint8Array(clean.length / 2);
++  for (let i = 0; i < out.length; i++) {
++    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
++  }
++  return out;
++}
++
++function buildAuthorization(
++  userAddress: string,
++  encryptionPubKey: string,
++  signature: string,
++): { payload: unknown; headerValue: string } {
++  const now = Math.floor(Date.now() / 1000);
++  const payload = {
++    userAddress,
++    encryptionPubKey,
++    notBefore: now,
++    expiresAt: now + 3600,
++  };
++  const headerValue = `EIP712 ${btoa(
++    JSON.stringify({ payload, signature }),
++  )}`;
++  return { payload, headerValue };
++}
++
++function buildTypedData(userAddress: string, encryptionPubKey: string) {
++  const now = Math.floor(Date.now() / 1000);
++  return {
++    types: {
++      EIP712Domain: [
++        { name: 'name', type: 'string' },
++        { name: 'version', type: 'string' },
++        { name: 'chainId', type: 'uint256' },
++        { name: 'verifyingContract', type: 'address' },
++      ],
++      DataAccessAuthorization: [
++        { name: 'userAddress', type: 'address' },
++        { name: 'encryptionPubKey', type: 'string' },
++        { name: 'notBefore', type: 'uint256' },
++        { name: 'expiresAt', type: 'uint256' },
++      ],
++    },
++    domain: {
++      name: 'Handle Gateway',
++      version: '1',
++      chainId: CHAIN_ID,
++      verifyingContract: NOX_COMPUTE,
++    },
++    primaryType: 'DataAccessAuthorization',
++    message: {
++      userAddress,
++      encryptionPubKey,
++      notBefore: now,
++      expiresAt: now + 3600,
++    },
++  };
++}
++
++async function generateEphemeralKeyPair(): Promise<{
++  publicKeyHex: string;
++  privateKey: CryptoKey;
++}> {
++  const keyPair = (await crypto.subtle.generateKey(
++    {
++      name: 'RSA-OAEP',
++      modulusLength: 2048,
++      publicExponent: new Uint8Array([0x01, 0x00, 0x01]),
++      hash: 'SHA-256',
++    },
++    true,
++    ['decrypt'],
++  )) as CryptoKeyPair;
++  const spki = await crypto.subtle.exportKey('spki', keyPair.publicKey);
++  return {
++    publicKeyHex: bytesToHex(new Uint8Array(spki)),
++    privateKey: keyPair.privateKey,
++  };
++}
++
++async function fetchCipher(
++  handle: string,
++  authHeader: string,
++): Promise<{ ciphertext: Uint8Array; iv: Uint8Array; encryptedSharedSecret: Uint8Array }> {
++  const res = await fetch(`${HANDLE_GATEWAY}/v0/secrets/${handle}`, {
++    headers: { Authorization: authHeader },
++  });
++  if (!res.ok) {
++    const body = await res.text();
++    throw new Error(`Gateway ${res.status}: ${body}`);
++  }
++  const json = (await res.json()) as {
++    ciphertext: string;
++    iv: string;
++    encryptedSharedSecret: string;
++  };
++  return {
++    ciphertext: hexToBytes(json.ciphertext),
++    iv: hexToBytes(json.iv),
++    encryptedSharedSecret: hexToBytes(json.encryptedSharedSecret),
++  };
++}
++
++async function eciesDecrypt(
++  encryptedSharedSecret: Uint8Array,
++  iv: Uint8Array,
++  ciphertext: Uint8Array,
++  rsaPrivate: CryptoKey,
++): Promise<Uint8Array> {
++  const sharedSecretBuf = await crypto.subtle.decrypt(
++    { name: 'RSA-OAEP' },
++    rsaPrivate,
++    encryptedSharedSecret,
++  );
++  const keyMaterial = await crypto.subtle.importKey(
++    'raw',
++    new Uint8Array(sharedSecretBuf),
++    'HKDF',
++    false,
++    ['deriveKey'],
++  );
++  const aesKey = await crypto.subtle.deriveKey(
++    {
++      name: 'HKDF',
++      hash: 'SHA-256',
++      salt: new Uint8Array(32),
++      info: DERIVATION_INFO,
++    },
++    keyMaterial,
++    { name: 'AES-GCM', length: 256 },
++    false,
++    ['decrypt'],
++  );
++  const plainBuf = await crypto.subtle.decrypt(
++    { name: 'AES-GCM', iv, tagLength: 128 },
++    aesKey,
++    ciphertext,
++  );
++  return new Uint8Array(plainBuf);
++}
++
++/**
++ * Read a handle's Solidity type from byte index 30 (per Nox handle encoding).
++ * For this demo we only care about uint256 (code 36) since ERC-7984 balances
++ * are uint256. We return the decoded value as a bigint in that case.
++ */
++function decodePlaintext(handleHex: string, plain: Uint8Array): bigint {
++  const bytes = hexToBytes(handleHex);
++  const typeCode = bytes[30];
++  // uint256 = 36, but also handle uint16/uintN generically by converting big-endian bytes
++  if (typeCode < 4 || typeCode > 36) {
++    throw new Error(`Unsupported handle type code ${typeCode}`);
++  }
++  let value = 0n;
++  for (const b of plain) value = (value << 8n) + BigInt(b);
++  return value;
++}
++
++export async function noxDecrypt(
++  userAddress: string,
++  handle: string,
++): Promise<bigint> {
++  const { publicKeyHex, privateKey } = await generateEphemeralKeyPair();
++  const typedData = buildTypedData(userAddress, publicKeyHex);
++  const signature = await noxSignTypedDataV4(typedData, userAddress);
++  const { headerValue } = buildAuthorization(userAddress, publicKeyHex, signature);
++
++  const { ciphertext, iv, encryptedSharedSecret } = await fetchCipher(handle, headerValue);
++  const plain = await eciesDecrypt(encryptedSharedSecret, iv, ciphertext, privateKey);
++  return decodePlaintext(handle, plain);
++}
 diff --git a/ui/components/app/assets/private-balance-tab/nox-rpc.ts b/ui/components/app/assets/private-balance-tab/nox-rpc.ts
 new file mode 100644
 index 0000000..9f3b324
@@ -86,10 +324,10 @@ index 0000000..9f3b324
 +}
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 new file mode 100644
-index 0000000..ddd33b5
+index 0000000..8d49434
 --- /dev/null
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,332 @@
 +import React, { useCallback, useEffect, useState } from 'react';
 +import { useSelector } from 'react-redux';
 +import {
@@ -118,6 +356,7 @@ index 0000000..ddd33b5
 +  buildDappDeepLink,
 +  fetchBalanceHandle,
 +} from './nox-rpc';
++import { noxDecrypt } from './nox-client';
 +
 +const NOX_CTOKENS = [
 +  {
@@ -137,6 +376,23 @@ index 0000000..ddd33b5
 +  | { status: 'ok'; handle: string; zero: boolean }
 +  | { status: 'error'; message: string };
 +
++type RevealState =
++  | { status: 'hidden' }
++  | { status: 'signing' }
++  | { status: 'fetching' }
++  | { status: 'ok'; value: bigint }
++  | { status: 'error'; message: string };
++
++function formatAmount(v: bigint, decimals: number): string {
++  if (v === 0n) return '0';
++  const unit = 10n ** BigInt(decimals);
++  const whole = v / unit;
++  const frac = v % unit;
++  if (frac === 0n) return whole.toString();
++  const fracStr = frac.toString().padStart(decimals, '0').replace(/0+$/, '');
++  return `${whole}.${fracStr}`;
++}
++
 +function shortHandle(h: string): string {
 +  if (h.length < 18) return h;
 +  return `${h.slice(0, 10)}…${h.slice(-8)}`;
@@ -146,13 +402,19 @@ index 0000000..ddd33b5
 +  token,
 +  ownerAddress,
 +  load,
++  reveal,
++  onReveal,
++  onHide,
 +}: {
 +  token: (typeof NOX_CTOKENS)[number];
 +  ownerAddress: string;
 +  load: LoadState;
++  reveal: RevealState;
++  onReveal: () => void;
++  onHide: () => void;
 +}) {
 +  const openDapp = useCallback(
-+    (action: 'decrypt' | 'send' | 'shield') => {
++    (action: 'send' | 'shield') => {
 +      const params: { token: string; handle?: string } = { token: token.address };
 +      if (load.status === 'ok') params.handle = load.handle;
 +      global.platform?.openTab({ url: buildDappDeepLink(action, params) });
@@ -167,6 +429,18 @@ index 0000000..ddd33b5
 +    revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.errorDefault}>error</Text>;
 +  } else if (load.status === 'ok' && load.zero) {
 +    revealed = <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textAlternative}>No balance on this account</Text>;
++  } else if (reveal.status === 'signing') {
++    revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.textAlternative}>Awaiting signature…</Text>;
++  } else if (reveal.status === 'fetching') {
++    revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.textAlternative}>Decrypting…</Text>;
++  } else if (reveal.status === 'error') {
++    revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.errorDefault}>{reveal.message}</Text>;
++  } else if (reveal.status === 'ok') {
++    revealed = (
++      <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.successDefault}>
++        {formatAmount(reveal.value, token.decimals)} {token.symbol}
++      </Text>
++    );
 +  } else if (load.status === 'ok') {
 +    revealed = (
 +      <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textDefault}>
@@ -189,6 +463,8 @@ index 0000000..ddd33b5
 +  );
 +
 +  const canDecrypt = load.status === 'ok' && !load.zero;
++  const isRevealing = reveal.status === 'signing' || reveal.status === 'fetching';
++  const isRevealed = reveal.status === 'ok';
 +
 +  return (
 +    <Box
@@ -258,10 +534,10 @@ index 0000000..ddd33b5
 +        <Button
 +          variant={ButtonVariant.Link}
 +          size={ButtonSize.Sm}
-+          onClick={() => openDapp('decrypt')}
-+          disabled={!canDecrypt}
++          onClick={isRevealed ? onHide : onReveal}
++          disabled={!canDecrypt || isRevealing}
 +        >
-+          Decrypt
++          {isRevealed ? 'Hide' : isRevealing ? '…' : 'Decrypt'}
 +        </Button>
 +      </Box>
 +    </Box>
@@ -271,6 +547,7 @@ index 0000000..ddd33b5
 +export default function PrivateBalanceTab() {
 +  const ownerAddress = useSelector(getSelectedAddress) as string | undefined;
 +  const [loads, setLoads] = useState<Record<string, LoadState>>({});
++  const [reveals, setReveals] = useState<Record<string, RevealState>>({});
 +
 +  useEffect(() => {
 +    if (!ownerAddress) return;
@@ -280,6 +557,7 @@ index 0000000..ddd33b5
 +      NOX_CTOKENS.forEach((t) => { next[t.address] = { status: 'loading' }; });
 +      return next;
 +    });
++    setReveals({});
 +    (async () => {
 +      for (const token of NOX_CTOKENS) {
 +        try {
@@ -300,9 +578,40 @@ index 0000000..ddd33b5
 +    return () => { cancelled = true; };
 +  }, [ownerAddress]);
 +
-+  const decryptAll = () => {
-+    global.platform?.openTab({ url: buildDappDeepLink('decrypt') });
-+  };
++  const revealToken = useCallback(
++    async (tokenAddress: string) => {
++      if (!ownerAddress) return;
++      const load = loads[tokenAddress];
++      if (!load || load.status !== 'ok' || load.zero) return;
++      setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'signing' } }));
++      try {
++        const value = await noxDecrypt(ownerAddress, load.handle);
++        setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value } }));
++      } catch (err) {
++        setReveals((prev) => ({
++          ...prev,
++          [tokenAddress]: { status: 'error', message: (err as Error).message },
++        }));
++      }
++    },
++    [ownerAddress, loads],
++  );
++
++  const hideToken = useCallback(
++    (tokenAddress: string) => {
++      setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'hidden' } }));
++    },
++    [],
++  );
++
++  const decryptAll = useCallback(() => {
++    NOX_CTOKENS.forEach((t) => {
++      const load = loads[t.address];
++      if (load?.status === 'ok' && !load.zero) {
++        void revealToken(t.address);
++      }
++    });
++  }, [loads, revealToken]);
 +
 +  return (
 +    <Box padding={4}>
@@ -319,7 +628,7 @@ index 0000000..ddd33b5
 +          startIconName={IconName.Eye}
 +          onClick={decryptAll}
 +        >
-+          Decrypt in Nox app
++          Decrypt all
 +        </Button>
 +      </Box>
 +
@@ -329,14 +638,18 @@ index 0000000..ddd33b5
 +          token={token}
 +          ownerAddress={ownerAddress ?? ''}
 +          load={loads[token.address] ?? { status: 'idle' }}
++          reveal={reveals[token.address] ?? { status: 'hidden' }}
++          onReveal={() => void revealToken(token.address)}
++          onHide={() => hideToken(token.address)}
 +        />
 +      ))}
 +
 +      <Box marginTop={4}>
 +        <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
 +          Powered by Nox Protocol · ERC-7984 · Balances are end-to-end encrypted
-+          in a Trusted Execution Environment. Decryption is gasless (EIP-712
-+          signature) — currently performed in the Nox companion app.
++          in a Trusted Execution Environment. Decryption is gasless — MetaMask
++          signs an EIP-712 authorization that the Handle Gateway verifies
++          before returning the ciphertext.
 +        </Text>
 +      </Box>
 +    </Box>
@@ -406,3 +719,27 @@ index b66beb3..c695684 100644
        {isPerpsExperienceAvailable && (
          <Tab
            name={t('perps')}
+diff --git a/ui/store/actions.ts b/ui/store/actions.ts
+index fd65d47..d0b1c63 100644
+--- a/ui/store/actions.ts
++++ b/ui/store/actions.ts
+@@ -8223,3 +8223,19 @@ export async function perpsToggleTestnet(): Promise<void> {
+     logErrorWithMessage(error);
+   }
+ }
++
++/**
++ * Nox — sign an EIP-712 typed-data payload from within the MetaMask UI,
++ * used by the Private Balance tab to authenticate decrypt requests to
++ * the Nox Handle Gateway without deep-linking to an external dApp.
++ */
++export async function noxSignTypedDataV4(
++  typedData: unknown,
++  from: string,
++): Promise<string> {
++  log.debug('background.noxSignTypedDataV4');
++  return await submitRequestToBackground<string>('noxSignTypedDataV4', [
++    typedData,
++    from,
++  ]);
++}

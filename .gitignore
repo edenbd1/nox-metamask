@@ -41,5 +41,8 @@ Thumbs.db
 # Documentation mirror (already tracked separately)
 nox-docs/
 
+# MetaMask fork (separate upstream, not part of our tree)
+metamask-fork/
+
 # Claude Code internals
 .claude/

@@ -19,24 +19,32 @@ Then in Chrome: `chrome://extensions` → "Load unpacked" → select `metamask-f
 ## Patches
 
 ### `01-private-balance-tab.patch`
-Adds the `Private balance` tab between `Tokens` and `Perps` on the main account overview. Reads real balance handles from Arbitrum Sepolia (live `confidentialBalanceOf` call) and renders one card per tracked ERC-7984 token (currently hardcoded to cUSDC wrapping Circle's USDC at `0x75faf1…AA4d`). Decrypt / Send / Shield buttons deep-link to the Nox companion app (`http://localhost:5180`) with the token address and balance handle pre-filled; the companion app runs the gasless EIP-712 decryption and the confidential transfer / wrap flows against the real contracts.
+
+Adds the **Private balance** tab between Tokens and Perps on the main account overview. It's a fully native cToken experience:
+
+- **Live handle reads** from Arbitrum Sepolia via direct `confidentialBalanceOf` eth_call
+- **Native decryption** — click "Decrypt" on a card (or "Decrypt all") and MetaMask pops an EIP-712 signature prompt; once signed, the plaintext amount is fetched from the Nox Handle Gateway, decrypted client-side via Web Crypto (RSA-OAEP + HKDF-SHA-256 + AES-256-GCM), and displayed inline — **no external dApp, no extra tab**
+- **Send / Shield** deep-link to the companion Nox app (`http://localhost:5180`) with token + handle pre-filled, because those flows additionally need `encryptInput` round-trips and tx approval dialogs we haven't natively wired yet
 
 Files touched:
 - `shared/constants/app-state.ts` — new `PrivateBalance` enum entry
 - `ui/components/multichain/account-overview/account-overview-tabs.tsx` — import + render the tab
 - `ui/components/multichain/account-overview/account-overview-eth.tsx` — `showPrivateBalance={true}`
+- `app/scripts/metamask-controller.js` — new `noxSignTypedDataV4` API method bridging `SignatureController.newUnsignedTypedMessage` for UI-originated typed-data signing
+- `ui/store/actions.ts` — matching `noxSignTypedDataV4` UI action
 - `ui/components/app/assets/private-balance-tab/private-balance-tab.tsx` — tab component
 - `ui/components/app/assets/private-balance-tab/nox-rpc.ts` — direct-RPC handle reader + deep-link helpers
+- `ui/components/app/assets/private-balance-tab/nox-client.ts` — self-contained Handle Gateway client (EIP-712 payload builder + RSA keygen + fetch + ECIES decrypt) using Web Crypto API
 - `ui/components/app/assets/private-balance-tab/index.ts` — barrel export
 
-### Architectural notes
+### Architectural note
 
-**Why deep-link to the companion app for Decrypt/Send/Shield instead of native in-MetaMask signing?**
+The `noxSignTypedDataV4` bridge we added is the minimum surface a Snap API would need to expose to let a Snap do the same thing without forking MetaMask. Today, typed-data signing from the wallet's own UI is not exposed as a `submitRequestToBackground` endpoint — dApps route through the provider engine but in-wallet tabs have no equivalent. Our patch calls `SignatureController.newUnsignedTypedMessage` directly with `origin: 'metamask'`, producing a native confirmation dialog. Productizing this means either:
 
-Decryption is a gasless EIP-712 signature against the Handle Gateway; user-initiated typed-data signing from MetaMask's own UI is not currently exposed as a UI-store action (`ui/store/actions.ts` covers transactions but not arbitrary signatures). Reaching `SignatureController.newUnsignedTypedMessage` from the wallet UI requires a new background bridge. This fork demonstrates the **UX pattern** (native tab, per-token reveal, shield/send) while keeping the signing flow in the companion app where `window.ethereum` is available naturally. The MetaMask Snaps API would be the right long-term home for native wallet-initiated confidential-token flows (see our Snap at `packages/snap/`, `@iexec-nox/metamask-snap`).
+1. MetaMask exposes `noxSignTypedDataV4`-equivalent as a generic action for Snap-served home pages to use
+2. MetaMask ships an "Asset Snap" API so our Snap can contribute rows to the Tokens list, the same way non-EVM asset snaps do for Bitcoin/Solana
 
 ### Next patches (possible)
 
-- `02-native-signing.patch` — bridge `KeyringController.signTypedMessage` into `ui/store/actions.ts` to do EIP-712 sign-in-wallet
-- `03-native-tx-dispatch.patch` — Send / Shield / Unwrap via `submitRequestToBackground('addTransaction', ...)` (replaces the deep-link fallback)
-- `04-unwrap-flow.patch` — 2-step unwrap with `publicDecrypt` + `finalizeUnwrap`
+- `02-native-tx-dispatch.patch` — Send / Shield / Unwrap via `submitRequestToBackground('addTransaction', ...)` (replaces the Send/Shield deep-link fallback)
+- `03-unwrap-flow.patch` — 2-step unwrap with `publicDecrypt` + `finalizeUnwrap` in-wallet

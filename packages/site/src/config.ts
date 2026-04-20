@@ -14,9 +14,16 @@ export const SNAP_VERSION =
 
 export const PRESET_TOKENS = [
   {
-    address: '0x8EFfb4926cEE6E7DdB49bB64a8144C151774afd3' as `0x${string}`,
+    address: '0x52a12dC4558063AB2a451f52DA721F24Cae72DeC' as `0x${string}`,
     symbol: 'cUSDC',
-    name: 'Confidential USDC (Nox)',
+    name: 'Confidential USDC (Circle-backed)',
+    chainId: 421614,
+    underlying: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d' as `0x${string}`,
+  },
+  {
+    address: '0x8EFfb4926cEE6E7DdB49bB64a8144C151774afd3' as `0x${string}`,
+    symbol: 'cmUSDC',
+    name: 'Confidential mock USDC (E2E)',
     chainId: 421614,
     underlying: '0xEA6dE69c873129eCfD7cD04C70482a558B922f7E' as `0x${string}`,
   },
