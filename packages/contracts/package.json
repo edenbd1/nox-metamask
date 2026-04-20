@@ -5,7 +5,8 @@
   "scripts": {
     "compile": "hardhat compile",
     "deploy:arbSepolia": "hardhat run --network arbitrumSepolia scripts/deploy.ts",
-    "e2e": "ts-node --transpile-only scripts/e2e.ts"
+    "e2e": "ts-node --transpile-only scripts/e2e.ts",
+    "e2e:unwrap-viewers": "ts-node --transpile-only scripts/e2e-unwrap-viewers.ts"
   },
   "dependencies": {
     "@iexec-nox/nox-confidential-contracts": "^0.1.0",
