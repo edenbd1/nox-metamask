@@ -324,10 +324,10 @@ index 0000000..9f3b324
 +}
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 new file mode 100644
-index 0000000..0bb33e0
+index 0000000..89fb982
 --- /dev/null
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,430 @@
 +import React, { useCallback, useEffect, useState } from 'react';
 +import { useSelector } from 'react-redux';
 +import {
@@ -357,6 +357,16 @@ index 0000000..0bb33e0
 +  fetchBalanceHandle,
 +} from './nox-rpc';
 +import { noxDecrypt } from './nox-client';
++
++// Module-level cache: survives component unmount/remount. The side-panel UI
++// unmounts the tab when the EIP-712 signature popup steals focus, so any
++// state stored in useState is lost by the time the user clicks back. We key
++// by user+handle so the decrypted plaintext is stable across navigations.
++const decryptCache = new Map<string, bigint>();
++const inflightDecrypts = new Map<string, Promise<bigint>>();
++
++const cacheKey = (user: string, handle: string) =>
++  `${user.toLowerCase()}|${handle.toLowerCase()}`;
 +
 +// Known ERC-7984 confidential tokens on Arbitrum Sepolia (chainId 421614).
 +// Today there's no public ERC-7984 registry, so this list is curated; we
@@ -572,6 +582,9 @@ index 0000000..0bb33e0
 +      NOX_CTOKENS.forEach((t) => { next[t.address] = { status: 'loading' }; });
 +      return next;
 +    });
++    // Rehydrate reveal state from the module-level cache before the first
++    // fetch lands — lets us show plaintext immediately for handles we've
++    // already decrypted in this session.
 +    setReveals({});
 +    (async () => {
 +      for (const token of NOX_CTOKENS) {
@@ -579,6 +592,15 @@ index 0000000..0bb33e0
 +          const { handle, zero } = await fetchBalanceHandle(token.address, ownerAddress);
 +          if (!cancelled) {
 +            setLoads((prev) => ({ ...prev, [token.address]: { status: 'ok', handle, zero } }));
++            if (!zero) {
++              const cached = decryptCache.get(cacheKey(ownerAddress, handle));
++              if (cached !== undefined) {
++                setReveals((prev) => ({
++                  ...prev,
++                  [token.address]: { status: 'ok', value: cached },
++                }));
++              }
++            }
 +          }
 +        } catch (err) {
 +          if (!cancelled) {
@@ -598,9 +620,31 @@ index 0000000..0bb33e0
 +      if (!ownerAddress) return;
 +      const load = loads[tokenAddress];
 +      if (!load || load.status !== 'ok' || load.zero) return;
++
++      const key = cacheKey(ownerAddress, load.handle);
++
++      // Fast-path: already decrypted this handle before (e.g. user navigated
++      // away while the signature popup was open and came back).
++      const cached = decryptCache.get(key);
++      if (cached !== undefined) {
++        setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value: cached } }));
++        return;
++      }
++
 +      setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'signing' } }));
 +      try {
-+        const value = await noxDecrypt(ownerAddress, load.handle);
++        // De-dupe: if a decrypt for this handle is already in flight, await it.
++        let pending = inflightDecrypts.get(key);
++        if (!pending) {
++          pending = noxDecrypt(ownerAddress, load.handle).then((v) => {
++            decryptCache.set(key, v);
++            return v;
++          }).finally(() => {
++            inflightDecrypts.delete(key);
++          });
++          inflightDecrypts.set(key, pending);
++        }
++        const value = await pending;
 +        setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value } }));
 +      } catch (err) {
 +        setReveals((prev) => ({
