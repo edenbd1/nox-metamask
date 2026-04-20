@@ -1,61 +1,78 @@
 diff --git a/ui/components/app/assets/private-balance-tab/nox-client.ts b/ui/components/app/assets/private-balance-tab/nox-client.ts
-index 9211ae2..c1c5b38 100644
+index c1c5b38..0cc68bd 100644
 --- a/ui/components/app/assets/private-balance-tab/nox-client.ts
 +++ b/ui/components/app/assets/private-balance-tab/nox-client.ts
-@@ -114,15 +114,20 @@ async function fetchCipher(
-     const body = await res.text();
-     throw new Error(`Gateway ${res.status}: ${body}`);
-   }
-+  // Gateway response shape: { payload: {...}, signature }
-   const json = (await res.json()) as {
--    ciphertext: string;
--    iv: string;
--    encryptedSharedSecret: string;
-+    payload: {
-+      handle: string;
-+      ciphertext: string;
-+      iv: string;
-+      encryptedSharedSecret: string;
-+    };
-+    signature: string;
+@@ -31,26 +31,24 @@ function hexToBytes(hex: string): Uint8Array {
+   return out;
+ }
+ 
+-function buildAuthorization(
+-  userAddress: string,
+-  encryptionPubKey: string,
+-  signature: string,
+-): { payload: unknown; headerValue: string } {
++type DataAccessMessage = {
++  userAddress: string;
++  encryptionPubKey: string;
++  notBefore: number;
++  expiresAt: number;
++};
++
++// Critical: the `message` we sign and the `payload` we send to the gateway
++// MUST be byte-identical (same notBefore/expiresAt). Recomputing `now` twice
++// yields different timestamps → signature verification fails with 401.
++function buildTypedData(userAddress: string, encryptionPubKey: string) {
+   const now = Math.floor(Date.now() / 1000);
+-  const payload = {
++  const message: DataAccessMessage = {
+     userAddress,
+     encryptionPubKey,
+     notBefore: now,
+     expiresAt: now + 3600,
    };
+-  const headerValue = `EIP712 ${btoa(
+-    JSON.stringify({ payload, signature }),
+-  )}`;
+-  return { payload, headerValue };
+-}
+-
+-function buildTypedData(userAddress: string, encryptionPubKey: string) {
+-  const now = Math.floor(Date.now() / 1000);
    return {
--    ciphertext: hexToBytes(json.ciphertext),
--    iv: hexToBytes(json.iv),
--    encryptedSharedSecret: hexToBytes(json.encryptedSharedSecret),
-+    ciphertext: hexToBytes(json.payload.ciphertext),
-+    iv: hexToBytes(json.payload.iv),
-+    encryptedSharedSecret: hexToBytes(json.payload.encryptedSharedSecret),
+     types: {
+       EIP712Domain: [
+@@ -73,15 +71,17 @@ function buildTypedData(userAddress: string, encryptionPubKey: string) {
+       verifyingContract: NOX_COMPUTE,
+     },
+     primaryType: 'DataAccessAuthorization',
+-    message: {
+-      userAddress,
+-      encryptionPubKey,
+-      notBefore: now,
+-      expiresAt: now + 3600,
+-    },
++    message,
    };
  }
  
-@@ -165,15 +170,23 @@ async function eciesDecrypt(
- }
++function buildAuthorizationHeader(
++  message: DataAccessMessage,
++  signature: string,
++): string {
++  return `EIP712 ${btoa(JSON.stringify({ payload: message, signature }))}`;
++}
++
+ async function generateEphemeralKeyPair(): Promise<{
+   publicKeyHex: string;
+   privateKey: CryptoKey;
+@@ -201,7 +201,9 @@ export async function noxDecrypt(
+   const { publicKeyHex, privateKey } = await generateEphemeralKeyPair();
+   const typedData = buildTypedData(userAddress, publicKeyHex);
+   const signature = await noxSignTypedDataV4(typedData, userAddress);
+-  const { headerValue } = buildAuthorization(userAddress, publicKeyHex, signature);
++  // Reuse the exact same message that was signed, otherwise the gateway
++  // recomputes the EIP-712 digest with different timestamps and rejects.
++  const headerValue = buildAuthorizationHeader(typedData.message, signature);
  
- /**
-- * Read a handle's Solidity type from byte index 30 (per Nox handle encoding).
-- * For this demo we only care about uint256 (code 36) since ERC-7984 balances
-- * are uint256. We return the decoded value as a bigint in that case.
-+ * Decode the plaintext bytes returned by the Handle Gateway.
-+ *
-+ * Nox handle layout (32 bytes):
-+ *   byte 0     version
-+ *   bytes 1-4  chainId (big-endian uint32)
-+ *   byte 5     type code (SOLIDITY_TYPES index — uint256 = 35, uint16 = 5, etc.)
-+ *   byte 6     attribute
-+ *   bytes 7-31 random/unique
-+ *
-+ * For ERC-7984 balance/amount handles the type is uintN so we always decode
-+ * the plaintext as a big-endian unsigned integer.
-  */
- function decodePlaintext(handleHex: string, plain: Uint8Array): bigint {
-   const bytes = hexToBytes(handleHex);
--  const typeCode = bytes[30];
--  // uint256 = 36, but also handle uint16/uintN generically by converting big-endian bytes
--  if (typeCode < 4 || typeCode > 36) {
-+  const typeCode = bytes[5];
-+  // Accept any uintN (4..35) or intN (36..67)
-+  if (typeCode < 4 || typeCode > 67) {
-     throw new Error(`Unsupported handle type code ${typeCode}`);
-   }
-   let value = 0n;
+   const { ciphertext, iv, encryptedSharedSecret } = await fetchCipher(handle, headerValue);
+   const plain = await eciesDecrypt(encryptedSharedSecret, iv, ciphertext, privateKey);
