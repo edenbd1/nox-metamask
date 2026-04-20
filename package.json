@@ -1,0 +1,14 @@
+{
+  "name": "nox-metamask",
+  "private": true,
+  "version": "0.0.1",
+  "description": "MetaMask Snap + companion dApp for Nox confidential tokens (ERC-7984)",
+  "packageManager": "pnpm@10.14.0",
+  "scripts": {
+    "snap:build": "pnpm --filter @nox-metamask/snap build",
+    "snap:serve": "pnpm --filter @nox-metamask/snap serve",
+    "site:dev": "pnpm --filter @nox-metamask/site dev",
+    "dev": "pnpm -r --parallel --filter=!@nox-metamask/contracts run dev",
+    "contracts:deploy": "pnpm --filter @nox-metamask/contracts deploy:arbSepolia"
+  }
+}

@@ -40,3 +40,6 @@ Thumbs.db
 
 # Documentation mirror (already tracked separately)
 nox-docs/
+
+# Claude Code internals
+.claude/

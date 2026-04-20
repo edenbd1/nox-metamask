@@ -1,0 +1,11 @@
+{
+  "chainId": 421614,
+  "deployer": "0xf6d3C9Ed2115A5197F96f6189F6D63B51022Fe16",
+  "contracts": {
+    "mUSDC": "0xEA6dE69c873129eCfD7cD04C70482a558B922f7E",
+    "cUSDC": "0x8EFfb4926cEE6E7DdB49bB64a8144C151774afd3"
+  },
+  "nox": {
+    "noxCompute": "0xd464B198f06756a1d00be223634b85E0a731c229"
+  }
+}

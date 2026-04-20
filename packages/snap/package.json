@@ -1,0 +1,27 @@
+{
+  "name": "@nox-metamask/snap",
+  "version": "0.0.1",
+  "description": "Nox confidential tokens (ERC-7984) inside MetaMask",
+  "private": true,
+  "main": "dist/bundle.js",
+  "files": [
+    "dist/",
+    "snap.manifest.json",
+    "images/"
+  ],
+  "scripts": {
+    "build": "mm-snap build",
+    "serve": "mm-snap serve",
+    "watch": "mm-snap watch",
+    "manifest": "mm-snap manifest --fix"
+  },
+  "dependencies": {
+    "@metamask/snaps-sdk": "^6.17.1"
+  },
+  "devDependencies": {
+    "@metamask/snaps-cli": "^6.5.2",
+    "@types/node": "^22.7.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.2"
+  }
+}
