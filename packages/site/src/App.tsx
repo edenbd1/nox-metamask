@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useWallet } from './hooks/useWallet';
 import { useNox } from './hooks/useNox';
 import { useSnap } from './hooks/useSnap';
@@ -12,11 +12,32 @@ import { TARGET_CHAIN } from './config';
 
 type Tab = 'tokens' | 'send' | 'wrap' | 'unwrap' | 'viewers';
 
+const VIEW_TO_TAB: Record<string, Tab> = {
+  decrypt: 'tokens',
+  send: 'send',
+  shield: 'wrap',
+  wrap: 'wrap',
+  unwrap: 'unwrap',
+  viewers: 'viewers',
+};
+
+function readDeepLink(): Tab | null {
+  const params = new URLSearchParams(window.location.search);
+  const view = params.get('view');
+  if (!view) return null;
+  return VIEW_TO_TAB[view] ?? null;
+}
+
 export function App() {
   const wallet = useWallet();
   const { client: noxClient } = useNox(wallet.walletClient);
   const snap = useSnap();
-  const [tab, setTab] = useState<Tab>('tokens');
+  const [tab, setTab] = useState<Tab>(() => readDeepLink() ?? 'tokens');
+
+  useEffect(() => {
+    const view = new URLSearchParams(window.location.search).get('view');
+    if (view && VIEW_TO_TAB[view]) setTab(VIEW_TO_TAB[view]);
+  }, []);
 
   const onWrongChain = wallet.chainId !== null && wallet.chainId !== TARGET_CHAIN.id;
 

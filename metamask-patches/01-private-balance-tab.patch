@@ -17,13 +17,81 @@ index 0000000..1ddc791
 +++ b/ui/components/app/assets/private-balance-tab/index.ts
 @@ -0,0 +1 @@
 +export { default } from './private-balance-tab';
+diff --git a/ui/components/app/assets/private-balance-tab/nox-rpc.ts b/ui/components/app/assets/private-balance-tab/nox-rpc.ts
+new file mode 100644
+index 0000000..9f3b324
+--- /dev/null
++++ b/ui/components/app/assets/private-balance-tab/nox-rpc.ts
+@@ -0,0 +1,61 @@
++const ARB_SEPOLIA_RPC = 'https://sepolia-rollup.arbitrum.io/rpc';
++const ZERO_HANDLE = '0x' + '00'.repeat(32);
++
++export const NOX_DAPP_ORIGIN =
++  (globalThis as { VITE_NOX_APP_ORIGIN?: string }).VITE_NOX_APP_ORIGIN ||
++  'http://localhost:5180';
++
++// Selector for confidentialBalanceOf(address) returning bytes32.
++// keccak256("confidentialBalanceOf(address)").slice(0, 4) = 0x344ff101
++const CONFIDENTIAL_BALANCE_OF_SELECTOR = '0x344ff101';
++
++function addrToCallData(address: string): string {
++  const clean = address.toLowerCase().replace(/^0x/, '').padStart(64, '0');
++  return CONFIDENTIAL_BALANCE_OF_SELECTOR + clean;
++}
++
++export async function fetchBalanceHandle(
++  token: string,
++  owner: string,
++): Promise<{ handle: string; zero: boolean }> {
++  const body = {
++    jsonrpc: '2.0',
++    id: 1,
++    method: 'eth_call',
++    params: [
++      { to: token, data: addrToCallData(owner) },
++      'latest',
++    ],
++  };
++
++  const res = await fetch(ARB_SEPOLIA_RPC, {
++    method: 'POST',
++    headers: { 'content-type': 'application/json' },
++    body: JSON.stringify(body),
++  });
++  if (!res.ok) throw new Error(`RPC ${res.status}: ${await res.text()}`);
++
++  const json = (await res.json()) as { result?: string; error?: { message: string } };
++  if (json.error) throw new Error(`RPC error: ${json.error.message}`);
++  if (!json.result || json.result.length !== 66) {
++    throw new Error(`Unexpected RPC result: ${JSON.stringify(json)}`);
++  }
++  return {
++    handle: json.result,
++    zero: json.result === ZERO_HANDLE,
++  };
++}
++
++type DeepLinkAction = 'decrypt' | 'send' | 'shield';
++
++export function buildDappDeepLink(
++  action: DeepLinkAction,
++  params: { token?: string; handle?: string } = {},
++): string {
++  const base = `${NOX_DAPP_ORIGIN}/`;
++  const q = new URLSearchParams();
++  q.set('view', action);
++  if (params.token) q.set('token', params.token);
++  if (params.handle) q.set('handle', params.handle);
++  return `${base}?${q.toString()}`;
++}
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 new file mode 100644
-index 0000000..29586fb
+index 0000000..ddd33b5
 --- /dev/null
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -0,0 +1,177 @@
-+import React, { useState } from 'react';
+@@ -0,0 +1,257 @@
++import React, { useCallback, useEffect, useState } from 'react';
++import { useSelector } from 'react-redux';
 +import {
 +  Box,
 +  Button,
@@ -45,6 +113,11 @@ index 0000000..29586fb
 +  TextColor,
 +  TextVariant,
 +} from '../../../../helpers/constants/design-system';
++import { getSelectedAddress } from '../../../../selectors';
++import {
++  buildDappDeepLink,
++  fetchBalanceHandle,
++} from './nox-rpc';
 +
 +const NOX_CTOKENS = [
 +  {
@@ -58,25 +131,65 @@ index 0000000..29586fb
 +  },
 +];
 +
-+function MaskedAmount({ revealed, value, symbol }: { revealed: boolean; value: string; symbol: string }) {
-+  return (
-+    <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
-+      Revealed: <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textDefault}>
-+        {revealed ? value : '********'} {symbol}
-+      </Text>
-+    </Text>
-+  );
++type LoadState =
++  | { status: 'idle' }
++  | { status: 'loading' }
++  | { status: 'ok'; handle: string; zero: boolean }
++  | { status: 'error'; message: string };
++
++function shortHandle(h: string): string {
++  if (h.length < 18) return h;
++  return `${h.slice(0, 10)}…${h.slice(-8)}`;
 +}
 +
 +function CTokenCard({
 +  token,
-+  revealed,
-+  onDecrypt,
++  ownerAddress,
++  load,
 +}: {
-+  token: typeof NOX_CTOKENS[number];
-+  revealed: boolean;
-+  onDecrypt: () => void;
++  token: (typeof NOX_CTOKENS)[number];
++  ownerAddress: string;
++  load: LoadState;
 +}) {
++  const openDapp = useCallback(
++    (action: 'decrypt' | 'send' | 'shield') => {
++      const params: { token: string; handle?: string } = { token: token.address };
++      if (load.status === 'ok') params.handle = load.handle;
++      global.platform?.openTab({ url: buildDappDeepLink(action, params) });
++    },
++    [load, token.address],
++  );
++
++  let revealed: React.ReactNode;
++  if (load.status === 'loading') {
++    revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.textAlternative}>Loading…</Text>;
++  } else if (load.status === 'error') {
++    revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.errorDefault}>error</Text>;
++  } else if (load.status === 'ok' && load.zero) {
++    revealed = <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textAlternative}>No balance on this account</Text>;
++  } else if (load.status === 'ok') {
++    revealed = (
++      <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textDefault}>
++        ******** {token.symbol}
++      </Text>
++    );
++  } else {
++    revealed = <Text as="span" variant={TextVariant.bodySmMedium}>—</Text>;
++  }
++
++  const handleChip = load.status === 'ok' && !load.zero && (
++    <Text
++      as="span"
++      variant={TextVariant.bodyXs}
++      color={TextColor.textMuted}
++      style={{ fontFamily: 'monospace' }}
++    >
++      handle {shortHandle(load.handle)}
++    </Text>
++  );
++
++  const canDecrypt = load.status === 'ok' && !load.zero;
++
 +  return (
 +    <Box
 +      padding={4}
@@ -112,6 +225,7 @@ index 0000000..29586fb
 +          <Text variant={TextVariant.bodyMdMedium}>
 +            {token.symbol} · {token.network}
 +          </Text>
++          {handleChip}
 +        </Box>
 +      </Box>
 +
@@ -119,14 +233,17 @@ index 0000000..29586fb
 +        On-chain balance is encrypted.
 +      </Text>
 +
-+      <MaskedAmount revealed={revealed} value="— " symbol={token.symbol} />
++      <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++        Revealed: {revealed}
++      </Text>
 +
 +      <Box display={Display.Flex} gap={2}>
 +        <Button
 +          variant={ButtonVariant.Secondary}
 +          size={ButtonSize.Sm}
 +          startIconName={IconName.Arrow2UpRight}
-+          disabled
++          onClick={() => openDapp('send')}
++          disabled={!canDecrypt}
 +        >
 +          Send
 +        </Button>
@@ -134,16 +251,17 @@ index 0000000..29586fb
 +          variant={ButtonVariant.Secondary}
 +          size={ButtonSize.Sm}
 +          startIconName={IconName.ShieldLock}
-+          disabled
++          onClick={() => openDapp('shield')}
 +        >
 +          Shield
 +        </Button>
 +        <Button
 +          variant={ButtonVariant.Link}
 +          size={ButtonSize.Sm}
-+          onClick={onDecrypt}
++          onClick={() => openDapp('decrypt')}
++          disabled={!canDecrypt}
 +        >
-+          {revealed ? 'Hide' : 'Decrypt'}
++          Decrypt
 +        </Button>
 +      </Box>
 +    </Box>
@@ -151,13 +269,39 @@ index 0000000..29586fb
 +}
 +
 +export default function PrivateBalanceTab() {
-+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
-+  const allRevealed = NOX_CTOKENS.every((t) => revealed[t.address]);
++  const ownerAddress = useSelector(getSelectedAddress) as string | undefined;
++  const [loads, setLoads] = useState<Record<string, LoadState>>({});
 +
-+  const toggleAll = () => {
-+    const next: Record<string, boolean> = {};
-+    NOX_CTOKENS.forEach((t) => { next[t.address] = !allRevealed; });
-+    setRevealed(next);
++  useEffect(() => {
++    if (!ownerAddress) return;
++    let cancelled = false;
++    setLoads(() => {
++      const next: Record<string, LoadState> = {};
++      NOX_CTOKENS.forEach((t) => { next[t.address] = { status: 'loading' }; });
++      return next;
++    });
++    (async () => {
++      for (const token of NOX_CTOKENS) {
++        try {
++          const { handle, zero } = await fetchBalanceHandle(token.address, ownerAddress);
++          if (!cancelled) {
++            setLoads((prev) => ({ ...prev, [token.address]: { status: 'ok', handle, zero } }));
++          }
++        } catch (err) {
++          if (!cancelled) {
++            setLoads((prev) => ({
++              ...prev,
++              [token.address]: { status: 'error', message: (err as Error).message },
++            }));
++          }
++        }
++      }
++    })();
++    return () => { cancelled = true; };
++  }, [ownerAddress]);
++
++  const decryptAll = () => {
++    global.platform?.openTab({ url: buildDappDeepLink('decrypt') });
 +  };
 +
 +  return (
@@ -172,10 +316,10 @@ index 0000000..29586fb
 +        <Button
 +          variant={ButtonVariant.Primary}
 +          size={ButtonSize.Sm}
-+          startIconName={allRevealed ? IconName.EyeSlash : IconName.Eye}
-+          onClick={toggleAll}
++          startIconName={IconName.Eye}
++          onClick={decryptAll}
 +        >
-+          {allRevealed ? 'Hide all' : 'Decrypt all'}
++          Decrypt in Nox app
 +        </Button>
 +      </Box>
 +
@@ -183,10 +327,8 @@ index 0000000..29586fb
 +        <CTokenCard
 +          key={token.address}
 +          token={token}
-+          revealed={Boolean(revealed[token.address])}
-+          onDecrypt={() =>
-+            setRevealed((prev) => ({ ...prev, [token.address]: !prev[token.address] }))
-+          }
++          ownerAddress={ownerAddress ?? ''}
++          load={loads[token.address] ?? { status: 'idle' }}
 +        />
 +      ))}
 +
@@ -194,11 +336,16 @@ index 0000000..29586fb
 +        <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
 +          Powered by Nox Protocol · ERC-7984 · Balances are end-to-end encrypted
 +          in a Trusted Execution Environment. Decryption is gasless (EIP-712
-+          signature).
++          signature) — currently performed in the Nox companion app.
 +        </Text>
 +      </Box>
 +    </Box>
 +  );
++}
++
++declare global {
++  // eslint-disable-next-line no-var
++  var platform: { openTab?: (args: { url: string }) => void } | undefined;
 +}
 diff --git a/ui/components/multichain/account-overview/account-overview-eth.tsx b/ui/components/multichain/account-overview/account-overview-eth.tsx
 index 75795f9..db7fef4 100644
