@@ -47,6 +47,21 @@ export const erc7984Abi = [
     ] },
 ] as const;
 
+export const noxComputeAbi = [
+  { type: 'function', name: 'addViewer', stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'handle', type: 'bytes32' },
+      { name: 'viewer', type: 'address' },
+    ],
+    outputs: [] },
+  { type: 'function', name: 'isViewer', stateMutability: 'view',
+    inputs: [
+      { name: 'handle', type: 'bytes32' },
+      { name: 'viewer', type: 'address' },
+    ],
+    outputs: [{ type: 'bool' }] },
+] as const;
+
 export const wrapperAbi = [
   ...erc7984Abi,
   { type: 'function', name: 'underlying', stateMutability: 'view',
@@ -68,4 +83,15 @@ export const wrapperAbi = [
       { name: 'decryptedAmountAndProof', type: 'bytes' },
     ],
     outputs: [] },
+  { type: 'event', name: 'UnwrapRequested',
+    inputs: [
+      { name: 'to', type: 'address', indexed: true },
+      { name: 'unwrapRequestId', type: 'bytes32', indexed: false },
+    ] },
+  { type: 'event', name: 'UnwrapFinalized',
+    inputs: [
+      { name: 'to', type: 'address', indexed: true },
+      { name: 'unwrapRequestId', type: 'bytes32', indexed: false },
+      { name: 'amount', type: 'uint256', indexed: false },
+    ] },
 ] as const;

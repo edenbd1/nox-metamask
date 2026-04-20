@@ -2,13 +2,18 @@
   "version": "0.0.1",
   "description": "View and manage your Nox confidential tokens (ERC-7984) directly from MetaMask.",
   "proposedName": "Nox Confidential Tokens",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iExec-Nox/nox-metamask.git",
+    "directory": "packages/snap"
+  },
   "source": {
-    "shasum": "P9bdsl9K8+dAHAMQUBdz4f7+3EIDVfdbDjrUK2qJxq0=",
+    "shasum": "otZYdJLAVvZhxsjmlEXOY9ALCQRfO2ljJspF91/qzGY=",
     "location": {
       "npm": {
         "filePath": "dist/bundle.js",
         "iconPath": "images/icon.svg",
-        "packageName": "@nox-metamask/snap",
+        "packageName": "@iexec-nox/metamask-snap",
         "registry": "https://registry.npmjs.org/"
       }
     }

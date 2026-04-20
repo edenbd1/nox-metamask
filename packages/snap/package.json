@@ -1,19 +1,45 @@
 {
-  "name": "@nox-metamask/snap",
+  "name": "@iexec-nox/metamask-snap",
   "version": "0.0.1",
-  "description": "Nox confidential tokens (ERC-7984) inside MetaMask",
-  "private": true,
+  "description": "Nox confidential tokens (ERC-7984) inside MetaMask — view encrypted balances, send confidential transfers, wrap/unwrap, and grant viewers.",
+  "keywords": [
+    "metamask",
+    "snap",
+    "nox",
+    "iexec",
+    "erc-7984",
+    "confidential",
+    "privacy",
+    "tee",
+    "defi"
+  ],
+  "license": "MIT",
+  "author": "iExec",
+  "homepage": "https://github.com/iExec-Nox/nox-metamask#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iExec-Nox/nox-metamask.git",
+    "directory": "packages/snap"
+  },
+  "bugs": {
+    "url": "https://github.com/iExec-Nox/nox-metamask/issues"
+  },
   "main": "dist/bundle.js",
   "files": [
     "dist/",
-    "snap.manifest.json",
-    "images/"
+    "images/",
+    "snap.manifest.json"
   ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
     "build": "mm-snap build",
     "serve": "mm-snap serve",
     "watch": "mm-snap watch",
-    "manifest": "mm-snap manifest --fix"
+    "manifest": "mm-snap manifest --fix",
+    "prepublishOnly": "mm-snap build && mm-snap manifest --fix"
   },
   "dependencies": {
     "@metamask/snaps-sdk": "^6.17.1"

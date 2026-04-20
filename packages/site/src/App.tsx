@@ -7,9 +7,10 @@ import { AddToken } from './components/AddToken';
 import { Send } from './components/Send';
 import { Wrap } from './components/Wrap';
 import { Unwrap } from './components/Unwrap';
+import { Viewers } from './components/Viewers';
 import { TARGET_CHAIN } from './config';
 
-type Tab = 'tokens' | 'send' | 'wrap' | 'unwrap';
+type Tab = 'tokens' | 'send' | 'wrap' | 'unwrap' | 'viewers';
 
 export function App() {
   const wallet = useWallet();
@@ -60,6 +61,7 @@ export function App() {
         <button className={tab === 'send' ? 'active' : ''} onClick={() => setTab('send')}>Send</button>
         <button className={tab === 'wrap' ? 'active' : ''} onClick={() => setTab('wrap')}>Wrap</button>
         <button className={tab === 'unwrap' ? 'active' : ''} onClick={() => setTab('unwrap')}>Unwrap</button>
+        <button className={tab === 'viewers' ? 'active' : ''} onClick={() => setTab('viewers')}>Viewers</button>
       </nav>
 
       {tab === 'tokens' && (
@@ -86,7 +88,22 @@ export function App() {
         <Wrap account={wallet.account} publicClient={wallet.publicClient} walletClient={wallet.walletClient} />
       )}
       {tab === 'unwrap' && wallet.walletClient && (
-        <Unwrap account={wallet.account} walletClient={wallet.walletClient} noxClient={noxClient} />
+        <Unwrap
+          tokens={snap.tokens}
+          account={wallet.account}
+          publicClient={wallet.publicClient}
+          walletClient={wallet.walletClient}
+          noxClient={noxClient}
+        />
+      )}
+      {tab === 'viewers' && wallet.walletClient && (
+        <Viewers
+          tokens={snap.tokens}
+          account={wallet.account}
+          publicClient={wallet.publicClient}
+          walletClient={wallet.walletClient}
+          noxClient={noxClient}
+        />
       )}
     </main>
   );
