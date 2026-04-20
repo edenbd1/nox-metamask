@@ -324,10 +324,10 @@ index 0000000..9f3b324
 +}
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 new file mode 100644
-index 0000000..8d49434
+index 0000000..0bb33e0
 --- /dev/null
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,386 @@
 +import React, { useCallback, useEffect, useState } from 'react';
 +import { useSelector } from 'react-redux';
 +import {
@@ -358,11 +358,26 @@ index 0000000..8d49434
 +} from './nox-rpc';
 +import { noxDecrypt } from './nox-client';
 +
++// Known ERC-7984 confidential tokens on Arbitrum Sepolia (chainId 421614).
++// Today there's no public ERC-7984 registry, so this list is curated; we
++// filter at runtime to only render tokens where the user has a non-zero
++// balance (true "scrape" experience without full-log indexing).
 +const NOX_CTOKENS = [
 +  {
-+    address: '0x52a12dC4558063AB2a451f52DA721F24Cae72DeC',
++    // cdefi.iex.ec official Confidential USDC wrapper
++    address: '0x1CCeC6bC60dB15E4055D43Dc2531BB7D4E5B808e',
 +    symbol: 'cUSDC',
 +    name: 'Confidential USDC',
++    network: 'Arbitrum Sepolia',
++    underlying: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
++    underlyingSymbol: 'USDC',
++    decimals: 6,
++  },
++  {
++    // Our own demo wrapper (also backed by Circle USDC) — shown if funded
++    address: '0x52a12dC4558063AB2a451f52DA721F24Cae72DeC',
++    symbol: 'cUSDC',
++    name: 'Confidential USDC (Nox demo)',
 +    network: 'Arbitrum Sepolia',
 +    underlying: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
 +    underlyingSymbol: 'USDC',
@@ -632,24 +647,63 @@ index 0000000..8d49434
 +        </Button>
 +      </Box>
 +
-+      {NOX_CTOKENS.map((token) => (
-+        <CTokenCard
-+          key={token.address}
-+          token={token}
-+          ownerAddress={ownerAddress ?? ''}
-+          load={loads[token.address] ?? { status: 'idle' }}
-+          reveal={reveals[token.address] ?? { status: 'hidden' }}
-+          onReveal={() => void revealToken(token.address)}
-+          onHide={() => hideToken(token.address)}
-+        />
-+      ))}
++      {(() => {
++        const allLoaded = NOX_CTOKENS.every((t) => {
++          const s = loads[t.address]?.status;
++          return s === 'ok' || s === 'error';
++        });
++        const held = NOX_CTOKENS.filter((t) => {
++          const l = loads[t.address];
++          return l?.status === 'ok' && !l.zero;
++        });
++
++        if (!allLoaded) {
++          return (
++            <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++              Scanning known ERC-7984 tokens on Arbitrum Sepolia…
++            </Text>
++          );
++        }
++        if (held.length === 0) {
++          return (
++            <Box
++              padding={4}
++              borderColor={BorderColor.borderMuted}
++              borderRadius={BorderRadius.LG}
++              display={Display.Flex}
++              flexDirection={FlexDirection.Column}
++              gap={2}
++            >
++              <Text variant={TextVariant.bodyMdMedium}>
++                No confidential tokens on this account
++              </Text>
++              <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++                Scanned {NOX_CTOKENS.length} known ERC-7984 wrappers. Wrap some
++                ERC-20 via the Shield action in the companion app, then refresh.
++              </Text>
++            </Box>
++          );
++        }
++        return held.map((token) => (
++          <CTokenCard
++            key={token.address}
++            token={token}
++            ownerAddress={ownerAddress ?? ''}
++            load={loads[token.address] ?? { status: 'idle' }}
++            reveal={reveals[token.address] ?? { status: 'hidden' }}
++            onReveal={() => void revealToken(token.address)}
++            onHide={() => hideToken(token.address)}
++          />
++        ));
++      })()}
 +
 +      <Box marginTop={4}>
 +        <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
-+          Powered by Nox Protocol · ERC-7984 · Balances are end-to-end encrypted
-+          in a Trusted Execution Environment. Decryption is gasless — MetaMask
-+          signs an EIP-712 authorization that the Handle Gateway verifies
-+          before returning the ciphertext.
++          Auto-discovered by scanning {NOX_CTOKENS.length} known ERC-7984
++          wrappers on Arbitrum Sepolia. Balances are end-to-end encrypted in
++          a Trusted Execution Environment; decryption is gasless — MetaMask
++          signs an EIP-712 authorization that the Nox Handle Gateway
++          verifies before returning the ciphertext. Powered by Nox Protocol.
 +        </Text>
 +      </Box>
 +    </Box>
