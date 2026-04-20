@@ -1,0 +1,42 @@
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build artifacts
+dist/
+build/
+out/
+.next/
+.vite/
+.cache/
+coverage/
+*.tsbuildinfo
+
+# Hardhat / Foundry
+artifacts/
+cache/
+typechain-types/
+broadcast/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Documentation mirror (already tracked separately)
+nox-docs/
