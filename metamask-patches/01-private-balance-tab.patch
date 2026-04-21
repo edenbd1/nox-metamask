@@ -1,24 +1,46 @@
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-index 4446c38..3607083 100644
+index 3607083..30a978f 100644
 --- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -22,7 +22,8 @@ import {
-   TextColor,
-   TextVariant,
- } from '../../../../helpers/constants/design-system';
--import { getSelectedAddress, getSelectedNetworkClientId } from '../../../../selectors';
-+import { getSelectedAddress } from '../../../../selectors';
-+import { getSelectedNetworkClientId } from '../../../../../shared/lib/selectors/networks';
- import { addTransaction } from '../../../../store/actions';
- import { TransactionType } from '@metamask/transaction-controller';
- import {
-@@ -1013,8 +1014,7 @@ export default function PrivateBalanceTab() {
-         ));
-       })()}
+@@ -761,23 +761,24 @@ export default function PrivateBalanceTab() {
+   const [refetchTick, setRefetchTick] = useState(0);
+   const [activity, setActivity] = useState<TransferEvent[] | 'loading' | null>(null);
  
--      {/* ActivitySection temporarily disabled — isolating render crash */}
--      {false && <ActivitySection activity={activity} />}
-+      <ActivitySection activity={activity} />
+-  useEffect(() => {
+-    if (!ownerAddress) return;
+-    let cancelled = false;
+-    setActivity('loading');
+-    (async () => {
+-      try {
+-        const events = await fetchRecentTransfers(
+-          ownerAddress,
+-          NOX_CTOKENS.map((t) => t.address),
+-        );
+-        if (!cancelled) setActivity(events);
+-      } catch {
+-        if (!cancelled) setActivity([]);
+-      }
+-    })();
+-    return () => { cancelled = true; };
+-  }, [ownerAddress, refetchTick]);
++  // TEMPORARILY DISABLED — bisecting activity crash
++  // useEffect(() => {
++  //   if (!ownerAddress) return;
++  //   let cancelled = false;
++  //   setActivity('loading');
++  //   (async () => {
++  //     try {
++  //       const events = await fetchRecentTransfers(
++  //         ownerAddress,
++  //         NOX_CTOKENS.map((t) => t.address),
++  //       );
++  //       if (!cancelled) setActivity(events);
++  //     } catch {
++  //       if (!cancelled) setActivity([]);
++  //     }
++  //   })();
++  //   return () => { cancelled = true; };
++  // }, [ownerAddress, refetchTick]);
  
-       <Box marginTop={4}>
-         <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
+   useEffect(() => {
+     if (!ownerAddress) return;
