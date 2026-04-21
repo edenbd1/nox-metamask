@@ -1,179 +1,184 @@
-diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-index 389e4ab..6f47549 100644
---- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-+++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -17,7 +17,6 @@ import {
-   BorderRadius,
-   Display,
-   FlexDirection,
--  IconColor,
-   JustifyContent,
-   TextColor,
-   TextVariant,
-@@ -35,10 +34,8 @@ import {
-   encodeWrap,
-   encryptUint256,
-   fetchBalanceHandle,
--  fetchRecentTransfers,
-   parseUnwrapRequestIdFromLogs,
-   publicDecryptProof,
--  type TransferEvent,
- } from './nox-rpc';
- import { noxDecrypt } from './nox-client';
- 
-@@ -197,23 +194,7 @@ type FlowStatus =
- // USDC brand blue — displayed when the underlying is Circle's USDC
- const USDC_BLUE = '#2775CA';
- 
--function USDCGlyph() {
--  // Simplified USDC "$" mark, inspired by Circle's brand. Inline SVG keeps
--  // the bundle small and stays in the SES sandbox (no remote fetch).
--  return (
--    <svg width="22" height="22" viewBox="0 0 36 36" fill="none">
--      <path
--        d="M18 6.5c.6 0 1 .4 1 1v.9a5 5 0 0 1 4.2 4.7c0 .5-.4 1-1 1h-.7c-.5 0-.9-.3-1-.8-.3-1.3-1.4-2.2-2.8-2.2-1.7 0-3 1-3 2.4 0 1 .6 1.9 2 2.4l2.5.8c3 1 4.3 2.4 4.3 4.7 0 2.5-1.8 4.5-4.5 5v.9c0 .6-.4 1-1 1s-1-.4-1-1v-.9a5 5 0 0 1-4.3-4.7c0-.5.4-1 1-1h.7c.5 0 .9.3 1 .8.3 1.3 1.4 2.2 2.9 2.2 1.9 0 3.2-1 3.2-2.5 0-1.1-.7-1.9-2.3-2.5l-2.4-.8c-2.9-1-4.2-2.4-4.2-4.6 0-2.4 1.8-4.3 4.4-4.8V7.5c0-.6.4-1 1-1Z"
--        fill="#fff"
--      />
--    </svg>
--  );
--}
--
--function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
--  // Simplified: plain circle with the first letter. Previous version had an
--  // inline SVG glyph + a positioned lock badge which was crashing on render
--  // inside some React flows — reverted to the stable original.
-+function TokenLogo({ symbol }: { symbol: string }) {
-   const letter = symbol.replace(/^c/i, '').charAt(0).toUpperCase() || '?';
-   return (
-     <div
-@@ -235,94 +216,6 @@ function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
-   );
- }
- 
--function ActivitySection({ activity }: { activity: TransferEvent[] | 'loading' | null }) {
--  if (activity === null) return null;
--  return (
--    <Box marginTop={4}>
--      <Box
--        display={Display.Flex}
--        alignItems={AlignItems.center}
--        gap={2}
--        marginBottom={2}
--      >
--        <Text variant={TextVariant.bodyMdMedium}>Recent activity</Text>
--        <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
--          · confidential transfers
--        </Text>
--      </Box>
--
--      {activity === 'loading' && (
--        <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
--          Scanning logs…
--        </Text>
--      )}
--
--      {Array.isArray(activity) && activity.length === 0 && (
--        <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
--          No recent transfers.
--        </Text>
--      )}
--
--      {Array.isArray(activity) && activity.length > 0 && (
--        <div
--          style={{
--            border: '1px solid var(--color-border-muted)',
--            borderRadius: 8,
--            overflow: 'hidden',
--          }}
--        >
--          {activity.map((ev, i) => {
--            const tokenMeta = NOX_CTOKENS.find(
--              (t) => t.address.toLowerCase() === ev.token.toLowerCase(),
--            );
--            const counterparty = ev.direction === 'out' ? ev.to : ev.from;
--            const label = ev.direction === 'out' ? 'Sent' : 'Received';
--            const prep = ev.direction === 'out' ? 'to' : 'from';
--            const arrow =
--              ev.direction === 'out' ? IconName.Arrow2UpRight : IconName.Arrow2Down;
--            const arrowColor =
--              ev.direction === 'out' ? IconColor.errorDefault : IconColor.successDefault;
--            return (
--              <a
--                key={`${ev.txHash}:${ev.direction}:${i}`}
--                href={`https://sepolia.arbiscan.io/tx/${ev.txHash}`}
--                target="_blank"
--                rel="noopener noreferrer"
--                style={{
--                  display: 'flex',
--                  alignItems: 'center',
--                  gap: 10,
--                  padding: '10px 12px',
--                  borderBottom:
--                    i === activity.length - 1
--                      ? 'none'
--                      : '1px solid var(--color-border-muted)',
--                  color: 'inherit',
--                  textDecoration: 'none',
--                }}
--              >
--                <Icon name={arrow} size={IconSize.Sm} color={arrowColor} />
--                <div style={{ flex: 1, minWidth: 0 }}>
--                  <div style={{ fontSize: 13, fontWeight: 500 }}>
--                    {label} {tokenMeta?.symbol ?? 'cToken'} {prep}{' '}
--                    <span style={{ fontFamily: 'monospace', color: 'var(--color-text-alternative)' }}>
--                      {counterparty.slice(0, 6)}…{counterparty.slice(-4)}
--                    </span>
--                  </div>
--                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
--                    block #{String(ev.blockNumber)} · encrypted amount
--                  </div>
--                </div>
--                <Icon name={IconName.Export} size={IconSize.Xs} color={IconColor.iconMuted} />
--              </a>
--            );
--          })}
--        </div>
--      )}
--    </Box>
--  );
--}
--
- const inputStyle: React.CSSProperties = {
-   width: '100%', padding: '7px 9px', fontSize: 12,
-   background: 'transparent', color: 'inherit',
-@@ -734,26 +627,6 @@ export default function PrivateBalanceTab() {
-   const [loads, setLoads] = useState<Record<string, LoadState>>({});
-   const [reveals, setReveals] = useState<Record<string, RevealState>>({});
-   const [refetchTick, setRefetchTick] = useState(0);
--  const [activity, setActivity] = useState<TransferEvent[] | 'loading' | null>(null);
--
--  // TEMPORARILY DISABLED — bisecting activity crash
--  // useEffect(() => {
--  //   if (!ownerAddress) return;
--  //   let cancelled = false;
--  //   setActivity('loading');
--  //   (async () => {
--  //     try {
--  //       const events = await fetchRecentTransfers(
--  //         ownerAddress,
--  //         NOX_CTOKENS.map((t) => t.address),
--  //       );
--  //       if (!cancelled) setActivity(events);
--  //     } catch {
--  //       if (!cancelled) setActivity([]);
--  //     }
--  //   })();
--  //   return () => { cancelled = true; };
--  // }, [ownerAddress, refetchTick]);
- 
-   useEffect(() => {
-     if (!ownerAddress) return;
-@@ -990,8 +863,6 @@ export default function PrivateBalanceTab() {
-         ));
-       })()}
- 
--      <ActivitySection activity={activity} />
--
-       <Box marginTop={4}>
-         <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
-           Auto-discovered by scanning {NOX_CTOKENS.length} known ERC-7984
+diff --git a/metamask-patches/01-private-balance-tab.patch b/metamask-patches/01-private-balance-tab.patch
+index 6a25a69..e69de29 100644
+--- a/metamask-patches/01-private-balance-tab.patch
++++ b/metamask-patches/01-private-balance-tab.patch
+@@ -1,179 +0,0 @@
+-diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
+-index 389e4ab..6f47549 100644
+---- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
+-+++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
+-@@ -17,7 +17,6 @@ import {
+-   BorderRadius,
+-   Display,
+-   FlexDirection,
+--  IconColor,
+-   JustifyContent,
+-   TextColor,
+-   TextVariant,
+-@@ -35,10 +34,8 @@ import {
+-   encodeWrap,
+-   encryptUint256,
+-   fetchBalanceHandle,
+--  fetchRecentTransfers,
+-   parseUnwrapRequestIdFromLogs,
+-   publicDecryptProof,
+--  type TransferEvent,
+- } from './nox-rpc';
+- import { noxDecrypt } from './nox-client';
+- 
+-@@ -197,23 +194,7 @@ type FlowStatus =
+- // USDC brand blue — displayed when the underlying is Circle's USDC
+- const USDC_BLUE = '#2775CA';
+- 
+--function USDCGlyph() {
+--  // Simplified USDC "$" mark, inspired by Circle's brand. Inline SVG keeps
+--  // the bundle small and stays in the SES sandbox (no remote fetch).
+--  return (
+--    <svg width="22" height="22" viewBox="0 0 36 36" fill="none">
+--      <path
+--        d="M18 6.5c.6 0 1 .4 1 1v.9a5 5 0 0 1 4.2 4.7c0 .5-.4 1-1 1h-.7c-.5 0-.9-.3-1-.8-.3-1.3-1.4-2.2-2.8-2.2-1.7 0-3 1-3 2.4 0 1 .6 1.9 2 2.4l2.5.8c3 1 4.3 2.4 4.3 4.7 0 2.5-1.8 4.5-4.5 5v.9c0 .6-.4 1-1 1s-1-.4-1-1v-.9a5 5 0 0 1-4.3-4.7c0-.5.4-1 1-1h.7c.5 0 .9.3 1 .8.3 1.3 1.4 2.2 2.9 2.2 1.9 0 3.2-1 3.2-2.5 0-1.1-.7-1.9-2.3-2.5l-2.4-.8c-2.9-1-4.2-2.4-4.2-4.6 0-2.4 1.8-4.3 4.4-4.8V7.5c0-.6.4-1 1-1Z"
+--        fill="#fff"
+--      />
+--    </svg>
+--  );
+--}
+--
+--function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
+--  // Simplified: plain circle with the first letter. Previous version had an
+--  // inline SVG glyph + a positioned lock badge which was crashing on render
+--  // inside some React flows — reverted to the stable original.
+-+function TokenLogo({ symbol }: { symbol: string }) {
+-   const letter = symbol.replace(/^c/i, '').charAt(0).toUpperCase() || '?';
+-   return (
+-     <div
+-@@ -235,94 +216,6 @@ function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
+-   );
+- }
+- 
+--function ActivitySection({ activity }: { activity: TransferEvent[] | 'loading' | null }) {
+--  if (activity === null) return null;
+--  return (
+--    <Box marginTop={4}>
+--      <Box
+--        display={Display.Flex}
+--        alignItems={AlignItems.center}
+--        gap={2}
+--        marginBottom={2}
+--      >
+--        <Text variant={TextVariant.bodyMdMedium}>Recent activity</Text>
+--        <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
+--          · confidential transfers
+--        </Text>
+--      </Box>
+--
+--      {activity === 'loading' && (
+--        <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
+--          Scanning logs…
+--        </Text>
+--      )}
+--
+--      {Array.isArray(activity) && activity.length === 0 && (
+--        <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
+--          No recent transfers.
+--        </Text>
+--      )}
+--
+--      {Array.isArray(activity) && activity.length > 0 && (
+--        <div
+--          style={{
+--            border: '1px solid var(--color-border-muted)',
+--            borderRadius: 8,
+--            overflow: 'hidden',
+--          }}
+--        >
+--          {activity.map((ev, i) => {
+--            const tokenMeta = NOX_CTOKENS.find(
+--              (t) => t.address.toLowerCase() === ev.token.toLowerCase(),
+--            );
+--            const counterparty = ev.direction === 'out' ? ev.to : ev.from;
+--            const label = ev.direction === 'out' ? 'Sent' : 'Received';
+--            const prep = ev.direction === 'out' ? 'to' : 'from';
+--            const arrow =
+--              ev.direction === 'out' ? IconName.Arrow2UpRight : IconName.Arrow2Down;
+--            const arrowColor =
+--              ev.direction === 'out' ? IconColor.errorDefault : IconColor.successDefault;
+--            return (
+--              <a
+--                key={`${ev.txHash}:${ev.direction}:${i}`}
+--                href={`https://sepolia.arbiscan.io/tx/${ev.txHash}`}
+--                target="_blank"
+--                rel="noopener noreferrer"
+--                style={{
+--                  display: 'flex',
+--                  alignItems: 'center',
+--                  gap: 10,
+--                  padding: '10px 12px',
+--                  borderBottom:
+--                    i === activity.length - 1
+--                      ? 'none'
+--                      : '1px solid var(--color-border-muted)',
+--                  color: 'inherit',
+--                  textDecoration: 'none',
+--                }}
+--              >
+--                <Icon name={arrow} size={IconSize.Sm} color={arrowColor} />
+--                <div style={{ flex: 1, minWidth: 0 }}>
+--                  <div style={{ fontSize: 13, fontWeight: 500 }}>
+--                    {label} {tokenMeta?.symbol ?? 'cToken'} {prep}{' '}
+--                    <span style={{ fontFamily: 'monospace', color: 'var(--color-text-alternative)' }}>
+--                      {counterparty.slice(0, 6)}…{counterparty.slice(-4)}
+--                    </span>
+--                  </div>
+--                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+--                    block #{String(ev.blockNumber)} · encrypted amount
+--                  </div>
+--                </div>
+--                <Icon name={IconName.Export} size={IconSize.Xs} color={IconColor.iconMuted} />
+--              </a>
+--            );
+--          })}
+--        </div>
+--      )}
+--    </Box>
+--  );
+--}
+--
+- const inputStyle: React.CSSProperties = {
+-   width: '100%', padding: '7px 9px', fontSize: 12,
+-   background: 'transparent', color: 'inherit',
+-@@ -734,26 +627,6 @@ export default function PrivateBalanceTab() {
+-   const [loads, setLoads] = useState<Record<string, LoadState>>({});
+-   const [reveals, setReveals] = useState<Record<string, RevealState>>({});
+-   const [refetchTick, setRefetchTick] = useState(0);
+--  const [activity, setActivity] = useState<TransferEvent[] | 'loading' | null>(null);
+--
+--  // TEMPORARILY DISABLED — bisecting activity crash
+--  // useEffect(() => {
+--  //   if (!ownerAddress) return;
+--  //   let cancelled = false;
+--  //   setActivity('loading');
+--  //   (async () => {
+--  //     try {
+--  //       const events = await fetchRecentTransfers(
+--  //         ownerAddress,
+--  //         NOX_CTOKENS.map((t) => t.address),
+--  //       );
+--  //       if (!cancelled) setActivity(events);
+--  //     } catch {
+--  //       if (!cancelled) setActivity([]);
+--  //     }
+--  //   })();
+--  //   return () => { cancelled = true; };
+--  // }, [ownerAddress, refetchTick]);
+- 
+-   useEffect(() => {
+-     if (!ownerAddress) return;
+-@@ -990,8 +863,6 @@ export default function PrivateBalanceTab() {
+-         ));
+-       })()}
+- 
+--      <ActivitySection activity={activity} />
+--
+-       <Box marginTop={4}>
+-         <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
+-           Auto-discovered by scanning {NOX_CTOKENS.length} known ERC-7984
