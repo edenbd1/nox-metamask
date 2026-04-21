@@ -1,14 +1,24 @@
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-index 6ea4edc..4446c38 100644
+index 4446c38..3607083 100644
 --- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -1013,7 +1013,8 @@ export default function PrivateBalanceTab() {
+@@ -22,7 +22,8 @@ import {
+   TextColor,
+   TextVariant,
+ } from '../../../../helpers/constants/design-system';
+-import { getSelectedAddress, getSelectedNetworkClientId } from '../../../../selectors';
++import { getSelectedAddress } from '../../../../selectors';
++import { getSelectedNetworkClientId } from '../../../../../shared/lib/selectors/networks';
+ import { addTransaction } from '../../../../store/actions';
+ import { TransactionType } from '@metamask/transaction-controller';
+ import {
+@@ -1013,8 +1014,7 @@ export default function PrivateBalanceTab() {
          ));
        })()}
  
--      <ActivitySection activity={activity} />
-+      {/* ActivitySection temporarily disabled — isolating render crash */}
-+      {false && <ActivitySection activity={activity} />}
+-      {/* ActivitySection temporarily disabled — isolating render crash */}
+-      {false && <ActivitySection activity={activity} />}
++      <ActivitySection activity={activity} />
  
        <Box marginTop={4}>
          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
