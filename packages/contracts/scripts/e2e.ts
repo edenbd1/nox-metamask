@@ -129,8 +129,10 @@ async function main() {
   console.log(`  handle: ${senderHandle}`);
   const { value: senderPlain, solidityType } = await nox.decrypt(senderHandle);
   console.log(`  decrypted: ${senderPlain} (${solidityType})`);
-  if (senderPlain !== AMOUNT) {
-    throw new Error(`Expected ${AMOUNT}, got ${senderPlain}`);
+  // Sender has accumulated balance from prior E2E runs — require at least
+  // what we just wrapped, not an exact match.
+  if (senderPlain < AMOUNT) {
+    throw new Error(`Expected at least ${AMOUNT}, got ${senderPlain}`);
   }
 
   // ---------- Step 5: confidential transfer ----------
@@ -153,9 +155,9 @@ async function main() {
   console.log(`  new handle: ${senderHandle2}`);
   const { value: senderPlain2 } = await nox.decrypt(senderHandle2);
   console.log(`  decrypted: ${senderPlain2}`);
-  const expected = AMOUNT - SEND_AMOUNT;
-  if (senderPlain2 !== expected) {
-    throw new Error(`Expected ${expected}, got ${senderPlain2}`);
+  const delta = (senderPlain as bigint) - (senderPlain2 as bigint);
+  if (delta !== SEND_AMOUNT) {
+    throw new Error(`Expected delta of ${SEND_AMOUNT}, got ${delta}`);
   }
 
   // ---------- Step 7: verify recipient balance handle ----------
