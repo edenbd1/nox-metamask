@@ -1,78 +1,13 @@
-diff --git a/ui/components/app/assets/private-balance-tab/nox-client.ts b/ui/components/app/assets/private-balance-tab/nox-client.ts
-index c1c5b38..0cc68bd 100644
---- a/ui/components/app/assets/private-balance-tab/nox-client.ts
-+++ b/ui/components/app/assets/private-balance-tab/nox-client.ts
-@@ -31,26 +31,24 @@ function hexToBytes(hex: string): Uint8Array {
-   return out;
- }
+diff --git a/ui/components/multichain/account-overview/account-overview-tabs.tsx b/ui/components/multichain/account-overview/account-overview-tabs.tsx
+index c695684..c4ae8ce 100644
+--- a/ui/components/multichain/account-overview/account-overview-tabs.tsx
++++ b/ui/components/multichain/account-overview/account-overview-tabs.tsx
+@@ -178,7 +178,7 @@ export const AccountOverviewTabs = ({
  
--function buildAuthorization(
--  userAddress: string,
--  encryptionPubKey: string,
--  signature: string,
--): { payload: unknown; headerValue: string } {
-+type DataAccessMessage = {
-+  userAddress: string;
-+  encryptionPubKey: string;
-+  notBefore: number;
-+  expiresAt: number;
-+};
-+
-+// Critical: the `message` we sign and the `payload` we send to the gateway
-+// MUST be byte-identical (same notBefore/expiresAt). Recomputing `now` twice
-+// yields different timestamps → signature verification fails with 401.
-+function buildTypedData(userAddress: string, encryptionPubKey: string) {
-   const now = Math.floor(Date.now() / 1000);
--  const payload = {
-+  const message: DataAccessMessage = {
-     userAddress,
-     encryptionPubKey,
-     notBefore: now,
-     expiresAt: now + 3600,
-   };
--  const headerValue = `EIP712 ${btoa(
--    JSON.stringify({ payload, signature }),
--  )}`;
--  return { payload, headerValue };
--}
--
--function buildTypedData(userAddress: string, encryptionPubKey: string) {
--  const now = Math.floor(Date.now() / 1000);
-   return {
-     types: {
-       EIP712Domain: [
-@@ -73,15 +71,17 @@ function buildTypedData(userAddress: string, encryptionPubKey: string) {
-       verifyingContract: NOX_COMPUTE,
-     },
-     primaryType: 'DataAccessAuthorization',
--    message: {
--      userAddress,
--      encryptionPubKey,
--      notBefore: now,
--      expiresAt: now + 3600,
--    },
-+    message,
-   };
- }
- 
-+function buildAuthorizationHeader(
-+  message: DataAccessMessage,
-+  signature: string,
-+): string {
-+  return `EIP712 ${btoa(JSON.stringify({ payload: message, signature }))}`;
-+}
-+
- async function generateEphemeralKeyPair(): Promise<{
-   publicKeyHex: string;
-   privateKey: CryptoKey;
-@@ -201,7 +201,9 @@ export async function noxDecrypt(
-   const { publicKeyHex, privateKey } = await generateEphemeralKeyPair();
-   const typedData = buildTypedData(userAddress, publicKeyHex);
-   const signature = await noxSignTypedDataV4(typedData, userAddress);
--  const { headerValue } = buildAuthorization(userAddress, publicKeyHex, signature);
-+  // Reuse the exact same message that was signed, otherwise the gateway
-+  // recomputes the EIP-712 digest with different timestamps and rejects.
-+  const headerValue = buildAuthorizationHeader(typedData.message, signature);
- 
-   const { ciphertext, iv, encryptedSharedSecret } = await fetchCipher(handle, headerValue);
-   const plain = await eciesDecrypt(encryptedSharedSecret, iv, ciphertext, privateKey);
+       {showPrivateBalance && (
+         <Tab
+-          name="Private balance"
++          name="cTokens"
+           tabKey={AccountOverviewTabKey.PrivateBalance}
+           data-testid="account-overview__private-balance-tab"
+         >
