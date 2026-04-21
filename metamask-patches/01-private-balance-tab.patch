@@ -1,711 +1,144 @@
-diff --git a/ui/components/app/assets/private-balance-tab/nox-rpc.ts b/ui/components/app/assets/private-balance-tab/nox-rpc.ts
-index 9c9107b..d7c3298 100644
---- a/ui/components/app/assets/private-balance-tab/nox-rpc.ts
-+++ b/ui/components/app/assets/private-balance-tab/nox-rpc.ts
-@@ -85,10 +85,14 @@ export async function encryptUint256(
-   if (!res.ok) {
-     throw new Error(`Gateway ${res.status}: ${await res.text()}`);
-   }
--  const json = (await res.json()) as { handle: string; proof: string };
-+  // Gateway returns { payload: { handle, proof }, signature }
-+  const json = (await res.json()) as {
-+    payload: { handle: string; proof: string };
-+    signature: string;
-+  };
-   return {
--    handle: json.handle as `0x${string}`,
--    proof: json.proof as `0x${string}`,
-+    handle: json.payload.handle as `0x${string}`,
-+    proof: json.payload.proof as `0x${string}`,
-   };
- }
- 
-@@ -114,26 +118,133 @@ export function encodeWrap(to: string, amount: bigint): `0x${string}` {
-   return ('0xbf376c7a' + padAddress(to) + padUint(amount)) as `0x${string}`;
- }
- 
-+function encodeDynamicBytes(data: string): string {
-+  const hex = stripHex(data);
-+  const length = padUint(BigInt(hex.length / 2));
-+  const padCount = (64 - (hex.length % 64)) % 64;
-+  return length + hex + '0'.repeat(padCount);
-+}
-+
- export function encodeConfidentialTransfer(
-   to: string,
-   handle: string,
-   inputProof: string,
- ): `0x${string}` {
--  // confidentialTransfer(address,bytes32,bytes) selector
--  // Head: to (32) + handle (32) + offset-to-bytes (32 = 0x60)
--  // Tail: length(32) + data padded to 32-byte boundary
--  const proofHex = stripHex(inputProof);
--  const proofBytes = proofHex.length / 2;
--  const lengthHex = padUint(BigInt(proofBytes));
--  // pad proof data to next 32-byte boundary
--  const padCount = (64 - (proofHex.length % 64)) % 64;
--  const paddedProof = proofHex + '0'.repeat(padCount);
-   return (
-     '0x2fb74e62' +
-     padAddress(to) +
-     stripHex(handle) +
-     padUint(0x60n) +
--    lengthHex +
--    paddedProof
-+    encodeDynamicBytes(inputProof)
-+  ) as `0x${string}`;
-+}
-+
-+export function encodeUnwrap(
-+  from: string,
-+  to: string,
-+  encryptedAmount: string,
-+  inputProof: string,
-+): `0x${string}` {
-+  // unwrap(address,address,bytes32,bytes)  selector 0x5bf4ef06
-+  // Head: from(32) + to(32) + handle(32) + offset-to-bytes(32 = 0x80)
-+  // Tail: length(32) + data_padded
-+  return (
-+    '0x5bf4ef06' +
-+    padAddress(from) +
-+    padAddress(to) +
-+    stripHex(encryptedAmount) +
-+    padUint(0x80n) +
-+    encodeDynamicBytes(inputProof)
-   ) as `0x${string}`;
- }
-+
-+export function encodeFinalizeUnwrap(
-+  unwrapRequestId: string,
-+  decryptedAmountAndProof: string,
-+): `0x${string}` {
-+  // finalizeUnwrap(bytes32,bytes)  selector 0x65f94fdb
-+  return (
-+    '0x65f94fdb' +
-+    stripHex(unwrapRequestId) +
-+    padUint(0x40n) +
-+    encodeDynamicBytes(decryptedAmountAndProof)
-+  ) as `0x${string}`;
-+}
-+
-+export function encodeAddViewer(handle: string, viewer: string): `0x${string}` {
-+  // addViewer(bytes32,address)  selector 0x10ff39ca
-+  return ('0x10ff39ca' + stripHex(handle) + padAddress(viewer)) as `0x${string}`;
-+}
-+
-+// ---- Public decrypt polling (for unwrap finalize proof) --------------------
-+
-+const UNWRAP_REQUESTED_TOPIC =
-+  '0x77d02d353c5629272875d11f1b34ec4c65d7430b075575b78cd2502034c469ee';
-+
-+/**
-+ * Parses a tx receipt's logs and returns the unwrapRequestId emitted by
-+ * UnwrapRequested(address indexed to, bytes32 unwrapRequestId). The second
-+ * field is non-indexed, so it lives in `data` (no topics beyond the
-+ * indexed `to` address).
-+ */
-+export function parseUnwrapRequestIdFromLogs(
-+  logs: readonly { address: string; topics: readonly string[]; data: string }[],
-+  wrapperAddress: string,
-+): `0x${string}` | null {
-+  for (const l of logs) {
-+    if (l.address.toLowerCase() !== wrapperAddress.toLowerCase()) continue;
-+    if (l.topics[0]?.toLowerCase() !== UNWRAP_REQUESTED_TOPIC) continue;
-+    // Non-indexed bytes32 is the first 32 bytes of data
-+    const data = l.data.replace(/^0x/, '');
-+    if (data.length < 64) continue;
-+    return ('0x' + data.slice(0, 64)) as `0x${string}`;
-+  }
-+  return null;
-+}
-+
-+/**
-+ * Poll the Handle Gateway for publicDecrypt of a handle that has just been
-+ * marked publicly decryptable on-chain (e.g. the burn handle from unwrap).
-+ * Returns the signed decryption proof (signature || ABI-encoded plaintext)
-+ * that finalizeUnwrap can verify on-chain.
-+ */
-+export async function publicDecryptProof(
-+  handle: string,
-+  { attempts = 10, initialDelayMs = 3000 } = {},
-+): Promise<{ decryptionProof: `0x${string}`; plaintext: bigint }> {
-+  let lastErr: unknown;
-+  for (let i = 0; i < attempts; i++) {
-+    try {
-+      const res = await fetch(`${HANDLE_GATEWAY}/v0/public/${handle}`);
-+      if (res.status === 404) {
-+        throw new Error('Object not found');
-+      }
-+      if (!res.ok) {
-+        throw new Error(`Gateway ${res.status}: ${await res.text()}`);
-+      }
-+      const json = (await res.json()) as
-+        | { decryptionProof: string }
-+        | { payload: { decryptionProof: string }; signature: string };
-+      const decryptionProof =
-+        ('decryptionProof' in json
-+          ? json.decryptionProof
-+          : json.payload.decryptionProof) as `0x${string}`;
-+      // Proof layout: 65-byte sig + ABI-encoded value.
-+      // For uint256 that's 32 bytes → read directly.
-+      const hex = decryptionProof.replace(/^0x/, '');
-+      const plaintextHex = hex.slice(65 * 2);
-+      let plaintext = 0n;
-+      for (let j = 0; j < plaintextHex.length; j += 2) {
-+        plaintext = (plaintext << 8n) + BigInt(parseInt(plaintextHex.slice(j, j + 2), 16));
-+      }
-+      return { decryptionProof, plaintext };
-+    } catch (err) {
-+      lastErr = err;
-+      const msg = (err as Error).message ?? '';
-+      const isLag = msg.includes('Object not found') || msg.includes('404');
-+      if (!isLag) throw err;
-+      await new Promise((r) => setTimeout(r, initialDelayMs * (i + 1)));
-+    }
-+  }
-+  throw lastErr;
-+}
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-index 4259a93..7f1df85 100644
+index 7f1df85..61c1ab0 100644
 --- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -25,13 +25,52 @@ import { getSelectedAddress, getSelectedNetworkClientId } from '../../../../sele
- import { addTransaction } from '../../../../store/actions';
- import { TransactionType } from '@metamask/transaction-controller';
- import {
--  buildDappDeepLink,
-+  encodeAddViewer,
-+  encodeApprove,
-   encodeConfidentialTransfer,
-+  encodeFinalizeUnwrap,
-+  encodeUnwrap,
-+  encodeWrap,
-   encryptUint256,
-   fetchBalanceHandle,
-+  parseUnwrapRequestIdFromLogs,
-+  publicDecryptProof,
- } from './nox-rpc';
- import { noxDecrypt } from './nox-client';
+@@ -190,6 +190,45 @@ type FlowStatus =
+   | { status: 'done'; message: string }
+   | { status: 'error'; message: string };
  
-+const NOX_COMPUTE: `0x${string}` = '0xd464B198f06756a1d00be223634b85E0a731c229';
-+const ARB_SEPOLIA_RPC = 'https://sepolia-rollup.arbitrum.io/rpc';
-+
-+async function waitReceipt(txHash: string, { timeoutMs = 60000 } = {}) {
-+  const t0 = Date.now();
-+  while (Date.now() - t0 < timeoutMs) {
-+    const res = await fetch(ARB_SEPOLIA_RPC, {
-+      method: 'POST',
-+      headers: { 'content-type': 'application/json' },
-+      body: JSON.stringify({
-+        jsonrpc: '2.0',
-+        id: 1,
-+        method: 'eth_getTransactionReceipt',
-+        params: [txHash],
-+      }),
-+    });
-+    const { result } = (await res.json()) as {
-+      result: null | {
-+        status: string;
-+        blockNumber: string;
-+        logs: { address: string; topics: string[]; data: string }[];
-+      };
-+    };
-+    if (result) return result;
-+    await new Promise((r) => setTimeout(r, 2000));
-+  }
-+  throw new Error(`Receipt timeout for ${txHash}`);
-+}
-+
-+function shortAddress(addr: string): string {
-+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-+}
-+
- // chrome.storage.session cache: survives side-panel remount within the same
- // browser session (wiped on browser close). The side panel is destroyed and
- // recreated when the EIP-712 signature popup takes focus, so a module-level
-@@ -143,12 +182,109 @@ function parseDecimalToRaw(input: string, decimals: number): bigint | null {
-   return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(padded || '0');
- }
- 
--type SendFormState =
--  | { status: 'closed' }
--  | { status: 'open' }
--  | { status: 'encrypting' }
--  | { status: 'submitting' }
--  | { status: 'done'; txHash?: string };
-+type Action = 'send' | 'shield' | 'unwrap' | 'viewers';
-+
-+type FlowStatus =
-+  | { status: 'idle' }
-+  | { status: 'busy'; label: string }
-+  | { status: 'done'; message: string }
-+  | { status: 'error'; message: string };
-+
-+const inputStyle: React.CSSProperties = {
-+  width: '100%', padding: '7px 9px', fontSize: 12,
-+  background: 'transparent', color: 'inherit',
-+  border: '1px solid rgba(127,127,127,0.25)', borderRadius: 6,
-+  boxSizing: 'border-box',
-+};
-+
-+const ACTION_META: Record<Action, { title: string; icon: IconName; fields: ('recipient' | 'amount' | 'viewer')[] }> = {
-+  send:    { title: 'Confidential send',       icon: IconName.Arrow2UpRight, fields: ['recipient', 'amount'] },
-+  shield:  { title: 'Shield (wrap)',            icon: IconName.ShieldLock,    fields: ['amount'] },
-+  unwrap:  { title: 'Unwrap (2-step)',          icon: IconName.Export,        fields: ['amount'] },
-+  viewers: { title: 'Grant viewer access',      icon: IconName.Eye,           fields: ['viewer'] },
-+};
-+
-+function ActionForm({
-+  action, token, flow, recipient, setRecipient, amount, setAmount,
-+  viewerAddr, setViewerAddr, onConfirm, onClose,
-+}: {
-+  action: Action;
-+  token: (typeof NOX_CTOKENS)[number];
-+  flow: FlowStatus;
-+  recipient: string; setRecipient: (v: string) => void;
-+  amount: string; setAmount: (v: string) => void;
-+  viewerAddr: string; setViewerAddr: (v: string) => void;
-+  onConfirm: () => void; onClose: () => void;
-+}) {
-+  const meta = ACTION_META[action];
-+  const busy = flow.status === 'busy';
-+  const done = flow.status === 'done';
++function TokenLogo({ symbol }: { symbol: string }) {
++  const letter = symbol.replace(/^c/i, '').charAt(0).toUpperCase() || '?';
++  // Derive a stable hue from the symbol so each cToken has its own color
++  let hash = 0;
++  for (let i = 0; i < symbol.length; i++) hash = (hash * 31 + symbol.charCodeAt(i)) >>> 0;
++  const hue = hash % 360;
 +  return (
 +    <Box
-+      marginTop={2}
-+      padding={3}
-+      backgroundColor={BackgroundColor.backgroundAlternative}
-+      borderRadius={BorderRadius.MD}
 +      display={Display.Flex}
-+      flexDirection={FlexDirection.Column}
-+      gap={2}
++      alignItems={AlignItems.center}
++      justifyContent={JustifyContent.center}
++      borderRadius={BorderRadius.full}
++      style={{
++        width: 34, height: 34, position: 'relative',
++        background: `linear-gradient(135deg, hsl(${hue},75%,55%), hsl(${(hue + 40) % 360},70%,35%))`,
++        boxShadow: '0 2px 6px hsla(0,0%,0%,0.25)',
++      }}
 +    >
-+      <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
-+        <Icon name={meta.icon} size={IconSize.Sm} color={TextColor.iconAlternative} />
-+        <Text variant={TextVariant.bodySmMedium}>{meta.title}</Text>
-+      </Box>
-+
-+      {meta.fields.includes('recipient') && (
-+        <>
-+          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>Recipient</Text>
-+          <input style={{ ...inputStyle, fontFamily: 'monospace' }} value={recipient}
-+            onChange={(e) => setRecipient(e.target.value)} placeholder="0x…" disabled={busy || done} />
-+        </>
-+      )}
-+      {meta.fields.includes('amount') && (
-+        <>
-+          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
-+            Amount ({action === 'shield' ? token.underlyingSymbol : token.symbol})
-+          </Text>
-+          <input style={inputStyle} value={amount}
-+            onChange={(e) => setAmount(e.target.value)} placeholder="0.50" disabled={busy || done} />
-+        </>
-+      )}
-+      {meta.fields.includes('viewer') && (
-+        <>
-+          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
-+            Viewer address (they'll be able to decrypt your current balance)
-+          </Text>
-+          <input style={{ ...inputStyle, fontFamily: 'monospace' }} value={viewerAddr}
-+            onChange={(e) => setViewerAddr(e.target.value)} placeholder="0x…" disabled={busy || done} />
-+        </>
-+      )}
-+
-+      {flow.status === 'busy' && (
-+        <Text variant={TextVariant.bodyXs} color={TextColor.textAlternative}>{flow.label}</Text>
-+      )}
-+      {flow.status === 'done' && (
-+        <Text variant={TextVariant.bodyXs} color={TextColor.successDefault}>✓ {flow.message}</Text>
-+      )}
-+      {flow.status === 'error' && (
-+        <Text variant={TextVariant.bodyXs} color={TextColor.errorDefault}>{flow.message}</Text>
-+      )}
-+
-+      <Box display={Display.Flex} gap={2}>
-+        {!done && (
-+          <Button variant={ButtonVariant.Primary} size={ButtonSize.Sm}
-+            onClick={onConfirm} disabled={busy}>
-+            Confirm
-+          </Button>
-+        )}
-+        <Button variant={ButtonVariant.Secondary} size={ButtonSize.Sm}
-+          onClick={onClose} disabled={busy}>
-+          {done ? 'Close' : 'Cancel'}
-+        </Button>
++      <span style={{ color: 'white', fontSize: 14, fontWeight: 600, letterSpacing: '-0.02em' }}>
++        {letter}
++      </span>
++      <Box
++        display={Display.Flex}
++        alignItems={AlignItems.center}
++        justifyContent={JustifyContent.center}
++        backgroundColor={BackgroundColor.backgroundDefault}
++        borderRadius={BorderRadius.full}
++        style={{
++          position: 'absolute', bottom: -3, right: -3,
++          width: 16, height: 16,
++          border: '1.5px solid hsl(0,0%,10%)',
++        }}
++      >
++        <Icon name={IconName.Lock} size={IconSize.Xs} color={TextColor.iconDefault} />
 +      </Box>
 +    </Box>
 +  );
 +}
- 
- function CTokenCard({
-   token,
-@@ -158,6 +294,7 @@ function CTokenCard({
-   reveal,
-   onReveal,
-   onHide,
-+  onBalanceChanged,
- }: {
-   token: (typeof NOX_CTOKENS)[number];
-   ownerAddress: string;
-@@ -166,60 +303,154 @@ function CTokenCard({
-   reveal: RevealState;
-   onReveal: () => void;
-   onHide: () => void;
-+  onBalanceChanged: () => void;
- }) {
--  const [sendForm, setSendForm] = useState<SendFormState>({ status: 'closed' });
-+  const [action, setAction] = useState<Action | null>(null);
-+  const [flow, setFlow] = useState<FlowStatus>({ status: 'idle' });
-+  // Form inputs (shared, reset when opening/closing a form)
-   const [recipient, setRecipient] = useState('');
-   const [amount, setAmount] = useState('');
--  const [sendError, setSendError] = useState<string | null>(null);
-+  const [viewerAddr, setViewerAddr] = useState('');
- 
--  const openDapp = useCallback(
--    (action: 'send' | 'shield') => {
--      const params: { token: string; handle?: string } = { token: token.address };
--      if (load.status === 'ok') params.handle = load.handle;
--      global.platform?.openTab({ url: buildDappDeepLink(action, params) });
--    },
--    [load, token.address],
--  );
-+  const chainIdHex = `0x${token.chainId.toString(16)}` as `0x${string}`;
- 
--  const openSend = useCallback(() => {
-+  const openAction = useCallback((a: Action) => {
-     setRecipient('');
-     setAmount('');
--    setSendError(null);
--    setSendForm({ status: 'open' });
-+    setViewerAddr('');
-+    setFlow({ status: 'idle' });
-+    setAction(a);
-+  }, []);
 +
-+  const closeAction = useCallback(() => {
-+    setAction(null);
-+    setFlow({ status: 'idle' });
-   }, []);
- 
-+  const dispatchTx = useCallback(
-+    async (to: string, data: `0x${string}`, type: TransactionType) => {
-+      const txMeta = await addTransaction(
-+        {
-+          from: ownerAddress as `0x${string}`,
-+          to: to as `0x${string}`,
-+          data,
-+          value: '0x0',
-+          chainId: chainIdHex,
-+        } as Parameters<typeof addTransaction>[0],
-+        { networkClientId, type },
-+      );
-+      return txMeta.hash as string;
-+    },
-+    [ownerAddress, chainIdHex, networkClientId],
-+  );
-+
-   const submitSend = useCallback(async () => {
--    setSendError(null);
-     if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
--      setSendError('Invalid recipient address');
-+      setFlow({ status: 'error', message: 'Invalid recipient address' });
-       return;
-     }
-     const raw = parseDecimalToRaw(amount, token.decimals);
-     if (raw === null || raw === 0n) {
--      setSendError('Invalid amount');
-+      setFlow({ status: 'error', message: 'Invalid amount' });
-       return;
-     }
-     try {
--      setSendForm({ status: 'encrypting' });
-+      setFlow({ status: 'busy', label: 'Encrypting amount…' });
-       const { handle, proof } = await encryptUint256(token.address, ownerAddress, raw);
--      setSendForm({ status: 'submitting' });
-+      setFlow({ status: 'busy', label: 'Awaiting MetaMask confirmation…' });
-       const data = encodeConfidentialTransfer(recipient, handle, proof);
--      const txMeta = await addTransaction(
--        {
--          from: ownerAddress as `0x${string}`,
--          to: token.address as `0x${string}`,
--          data,
--          value: '0x0',
--          chainId: `0x${token.chainId.toString(16)}` as `0x${string}`,
--        } as Parameters<typeof addTransaction>[0],
--        { networkClientId, type: TransactionType.contractInteraction },
-+      const hash = await dispatchTx(token.address, data, TransactionType.contractInteraction);
-+      setFlow({ status: 'busy', label: 'Waiting for tx to mine…' });
-+      await waitReceipt(hash);
-+      setFlow({ status: 'done', message: `Sent. Tx ${hash.slice(0, 10)}…` });
-+      onBalanceChanged();
-+    } catch (err) {
-+      setFlow({ status: 'error', message: (err as Error).message });
-+    }
-+  }, [recipient, amount, token.address, token.decimals, ownerAddress, dispatchTx, onBalanceChanged]);
-+
-+  const submitShield = useCallback(async () => {
-+    const raw = parseDecimalToRaw(amount, token.decimals);
-+    if (raw === null || raw === 0n) {
-+      setFlow({ status: 'error', message: `Enter an ${token.underlyingSymbol} amount` });
-+      return;
-+    }
-+    try {
-+      // Step 1 — approve underlying
-+      setFlow({ status: 'busy', label: '1/2 Approving ERC-20 — sign in MetaMask…' });
-+      const approveData = encodeApprove(token.address, raw);
-+      const approveHash = await dispatchTx(
-+        token.underlying,
-+        approveData,
-+        TransactionType.tokenMethodApprove,
-       );
--      setSendForm({ status: 'done', txHash: txMeta.hash as string | undefined });
-+      setFlow({ status: 'busy', label: '1/2 Waiting for approval to mine…' });
-+      await waitReceipt(approveHash);
-+      // Step 2 — wrap
-+      setFlow({ status: 'busy', label: '2/2 Wrapping — sign in MetaMask…' });
-+      const wrapData = encodeWrap(ownerAddress, raw);
-+      const wrapHash = await dispatchTx(token.address, wrapData, TransactionType.contractInteraction);
-+      setFlow({ status: 'busy', label: '2/2 Waiting for wrap to mine…' });
-+      await waitReceipt(wrapHash);
-+      setFlow({ status: 'done', message: `Shielded ${amount} ${token.underlyingSymbol}` });
-+      onBalanceChanged();
-+    } catch (err) {
-+      setFlow({ status: 'error', message: (err as Error).message });
-+    }
-+  }, [amount, token, ownerAddress, dispatchTx, onBalanceChanged]);
-+
-+  const submitUnwrap = useCallback(async () => {
-+    const raw = parseDecimalToRaw(amount, token.decimals);
-+    if (raw === null || raw === 0n) {
-+      setFlow({ status: 'error', message: 'Invalid amount' });
-+      return;
-+    }
-+    try {
-+      // Step 1 — encrypt amount, burn
-+      setFlow({ status: 'busy', label: '1/2 Encrypting + burning — sign in MetaMask…' });
-+      const { handle, proof } = await encryptUint256(token.address, ownerAddress, raw);
-+      const burnData = encodeUnwrap(ownerAddress, ownerAddress, handle, proof);
-+      const burnHash = await dispatchTx(token.address, burnData, TransactionType.contractInteraction);
-+      setFlow({ status: 'busy', label: '1/2 Waiting for burn to mine…' });
-+      const burnReceipt = await waitReceipt(burnHash);
-+      const unwrapRequestId = parseUnwrapRequestIdFromLogs(burnReceipt.logs, token.address);
-+      if (!unwrapRequestId) throw new Error('UnwrapRequested event not found in receipt');
-+
-+      // Step 2 — poll Gateway for public decryption proof, finalize
-+      setFlow({ status: 'busy', label: '2/2 Fetching decryption proof (gateway lag ~3-10s)…' });
-+      const { decryptionProof } = await publicDecryptProof(unwrapRequestId);
-+      setFlow({ status: 'busy', label: '2/2 Finalizing — sign in MetaMask…' });
-+      const finData = encodeFinalizeUnwrap(unwrapRequestId, decryptionProof);
-+      const finHash = await dispatchTx(token.address, finData, TransactionType.contractInteraction);
-+      setFlow({ status: 'busy', label: '2/2 Waiting for finalize to mine…' });
-+      await waitReceipt(finHash);
-+      setFlow({ status: 'done', message: `Unwrapped ${amount} → ${token.underlyingSymbol}` });
-+      onBalanceChanged();
-     } catch (err) {
--      setSendError((err as Error).message);
--      setSendForm({ status: 'open' });
-+      setFlow({ status: 'error', message: (err as Error).message });
-     }
--  }, [recipient, amount, token.address, token.decimals, token.chainId, ownerAddress, networkClientId]);
-+  }, [amount, token, ownerAddress, dispatchTx, onBalanceChanged]);
-+
-+  const submitViewer = useCallback(async () => {
-+    if (!/^0x[0-9a-fA-F]{40}$/.test(viewerAddr)) {
-+      setFlow({ status: 'error', message: 'Invalid viewer address' });
-+      return;
-+    }
-+    if (load.status !== 'ok') {
-+      setFlow({ status: 'error', message: 'Balance handle not loaded yet' });
-+      return;
-+    }
-+    try {
-+      setFlow({ status: 'busy', label: 'Granting viewer — sign in MetaMask…' });
-+      const data = encodeAddViewer(load.handle, viewerAddr);
-+      const hash = await dispatchTx(NOX_COMPUTE, data, TransactionType.contractInteraction);
-+      setFlow({ status: 'busy', label: 'Waiting for tx to mine…' });
-+      await waitReceipt(hash);
-+      setFlow({ status: 'done', message: `Granted ${shortAddress(viewerAddr)}` });
-+    } catch (err) {
-+      setFlow({ status: 'error', message: (err as Error).message });
-+    }
-+  }, [viewerAddr, load, dispatchTx]);
- 
-   let revealed: React.ReactNode;
-   if (load.status === 'loading') {
-@@ -312,13 +543,13 @@ function CTokenCard({
-         Revealed: {revealed}
-       </Text>
- 
--      <Box display={Display.Flex} gap={2}>
-+      <Box display={Display.Flex} gap={2} flexWrap={undefined}>
-         <Button
-           variant={ButtonVariant.Secondary}
-           size={ButtonSize.Sm}
-           startIconName={IconName.Arrow2UpRight}
--          onClick={openSend}
--          disabled={!canDecrypt || sendForm.status !== 'closed'}
-+          onClick={() => openAction('send')}
-+          disabled={!canDecrypt || action !== null}
-         >
-           Send
-         </Button>
-@@ -326,10 +557,29 @@ function CTokenCard({
-           variant={ButtonVariant.Secondary}
-           size={ButtonSize.Sm}
-           startIconName={IconName.ShieldLock}
--          onClick={() => openDapp('shield')}
-+          onClick={() => openAction('shield')}
-+          disabled={action !== null}
-         >
-           Shield
-         </Button>
-+        <Button
-+          variant={ButtonVariant.Secondary}
-+          size={ButtonSize.Sm}
-+          startIconName={IconName.Export}
-+          onClick={() => openAction('unwrap')}
-+          disabled={!canDecrypt || action !== null}
-+        >
-+          Unwrap
-+        </Button>
-+        <Button
-+          variant={ButtonVariant.Secondary}
-+          size={ButtonSize.Sm}
-+          startIconName={IconName.Eye}
-+          onClick={() => openAction('viewers')}
-+          disabled={!canDecrypt || action !== null}
-+        >
-+          Share
-+        </Button>
-         <Button
-           variant={ButtonVariant.Link}
-           size={ButtonSize.Sm}
-@@ -340,83 +590,25 @@ function CTokenCard({
-         </Button>
-       </Box>
- 
--      {sendForm.status !== 'closed' && (
+ const inputStyle: React.CSSProperties = {
+   width: '100%', padding: '7px 9px', fontSize: 12,
+   background: 'transparent', color: 'inherit',
+@@ -507,26 +546,7 @@ function CTokenCard({
+       gap={2}
+     >
+       <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
 -        <Box
--          marginTop={2}
--          padding={3}
--          backgroundColor={BackgroundColor.backgroundAlternative}
--          borderRadius={BorderRadius.MD}
 -          display={Display.Flex}
--          flexDirection={FlexDirection.Column}
--          gap={2}
+-          alignItems={AlignItems.center}
+-          justifyContent={JustifyContent.center}
+-          backgroundColor={BackgroundColor.infoMuted}
+-          borderRadius={BorderRadius.full}
+-          style={{ width: 32, height: 32, position: 'relative' }}
 -        >
--          <Text variant={TextVariant.bodySmMedium}>Send confidentially</Text>
--          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
--            Recipient
--          </Text>
--          <input
--            value={recipient}
--            onChange={(e) => setRecipient(e.target.value)}
--            placeholder="0x…"
--            disabled={sendForm.status !== 'open'}
--            style={{
--              width: '100%', padding: '6px 8px', fontFamily: 'monospace',
--              fontSize: 12, background: 'transparent', color: 'inherit',
--              border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6,
--            }}
--          />
--          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
--            Amount ({token.underlyingSymbol})
--          </Text>
--          <input
--            value={amount}
--            onChange={(e) => setAmount(e.target.value)}
--            placeholder="0.50"
--            disabled={sendForm.status !== 'open'}
--            style={{
--              width: '100%', padding: '6px 8px', fontSize: 13,
--              background: 'transparent', color: 'inherit',
--              border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6,
--            }}
--          />
--          {sendForm.status === 'encrypting' && (
--            <Text variant={TextVariant.bodyXs} color={TextColor.textAlternative}>
--              Encrypting amount via Handle Gateway…
--            </Text>
--          )}
--          {sendForm.status === 'submitting' && (
--            <Text variant={TextVariant.bodyXs} color={TextColor.textAlternative}>
--              Submitting confidential transfer — approve in MetaMask…
--            </Text>
--          )}
--          {sendForm.status === 'done' && (
--            <Text variant={TextVariant.bodyXs} color={TextColor.successDefault}>
--              Sent. Check Activity tab for confirmation.
--            </Text>
--          )}
--          {sendError && (
--            <Text variant={TextVariant.bodyXs} color={TextColor.errorDefault}>
--              {sendError}
--            </Text>
--          )}
--          <Box display={Display.Flex} gap={2}>
--            <Button
--              variant={ButtonVariant.Primary}
--              size={ButtonSize.Sm}
--              onClick={submitSend}
--              disabled={sendForm.status !== 'open'}
--            >
--              {sendForm.status === 'done' ? 'Close' : 'Confirm'}
--            </Button>
--            <Button
--              variant={ButtonVariant.Secondary}
--              size={ButtonSize.Sm}
--              onClick={() => setSendForm({ status: 'closed' })}
--            >
--              Cancel
--            </Button>
+-          <Text variant={TextVariant.bodyMdMedium} color={TextColor.infoDefault}>$</Text>
+-          <Box
+-            display={Display.Flex}
+-            alignItems={AlignItems.center}
+-            justifyContent={JustifyContent.center}
+-            backgroundColor={BackgroundColor.backgroundDefault}
+-            borderRadius={BorderRadius.full}
+-            style={{ position: 'absolute', bottom: -2, right: -2, width: 14, height: 14 }}
+-          >
+-            <Icon name={IconName.Lock} size={IconSize.Xs} color={TextColor.iconAlternative} />
 -          </Box>
 -        </Box>
-+      {action !== null && (
-+        <ActionForm
-+          action={action}
-+          token={token}
-+          flow={flow}
-+          recipient={recipient}
-+          setRecipient={setRecipient}
-+          amount={amount}
-+          setAmount={setAmount}
-+          viewerAddr={viewerAddr}
-+          setViewerAddr={setViewerAddr}
-+          onConfirm={
-+            action === 'send' ? submitSend
-+            : action === 'shield' ? submitShield
-+            : action === 'unwrap' ? submitUnwrap
-+            : submitViewer
-+          }
-+          onClose={closeAction}
-+        />
-       )}
-     </Box>
-   );
-@@ -427,6 +619,7 @@ export default function PrivateBalanceTab() {
-   const networkClientId = useSelector(getSelectedNetworkClientId) as string;
-   const [loads, setLoads] = useState<Record<string, LoadState>>({});
-   const [reveals, setReveals] = useState<Record<string, RevealState>>({});
-+  const [refetchTick, setRefetchTick] = useState(0);
- 
-   useEffect(() => {
-     if (!ownerAddress) return;
-@@ -485,7 +678,7 @@ export default function PrivateBalanceTab() {
-       }
-     })();
-     return () => { cancelled = true; };
--  }, [ownerAddress]);
-+  }, [ownerAddress, refetchTick]);
- 
-   const revealToken = useCallback(
-     async (tokenAddress: string) => {
-@@ -620,6 +813,7 @@ export default function PrivateBalanceTab() {
-             reveal={reveals[token.address] ?? { status: 'hidden' }}
-             onReveal={() => void revealToken(token.address)}
-             onHide={() => hideToken(token.address)}
-+            onBalanceChanged={() => setRefetchTick((n) => n + 1)}
-           />
-         ));
-       })()}
++        <TokenLogo symbol={token.symbol} />
+         <Box display={Display.Flex} flexDirection={FlexDirection.Column}>
+           <Text variant={TextVariant.bodyMdMedium}>
+             {token.symbol} · {token.network}
+@@ -755,7 +775,32 @@ export default function PrivateBalanceTab() {
+         alignItems={AlignItems.center}
+         marginBottom={3}
+       >
+-        <Text variant={TextVariant.bodyMdMedium}>Confidential tokens</Text>
++        <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
++          <Text variant={TextVariant.bodyMdMedium}>Confidential tokens</Text>
++          {(() => {
++            const heldCount = NOX_CTOKENS.filter((t) => {
++              const l = loads[t.address];
++              return l?.status === 'ok' && !l.zero;
++            }).length;
++            return (
++              <Box
++                paddingLeft={2}
++                paddingRight={2}
++                borderRadius={BorderRadius.full}
++                backgroundColor={BackgroundColor.backgroundMuted}
++                style={{ minWidth: 22, textAlign: 'center', lineHeight: '20px', height: 20 }}
++              >
++                <Text
++                  as="span"
++                  variant={TextVariant.bodyXs}
++                  color={TextColor.textAlternative}
++                >
++                  {heldCount}
++                </Text>
++              </Box>
++            );
++          })()}
++        </Box>
+         <Button
+           variant={ButtonVariant.Primary}
+           size={ButtonSize.Sm}
+@@ -791,14 +836,27 @@ export default function PrivateBalanceTab() {
+               borderRadius={BorderRadius.LG}
+               display={Display.Flex}
+               flexDirection={FlexDirection.Column}
+-              gap={2}
++              alignItems={AlignItems.center}
++              gap={3}
++              style={{ textAlign: 'center' }}
+             >
++              <Box
++                display={Display.Flex}
++                alignItems={AlignItems.center}
++                justifyContent={JustifyContent.center}
++                borderRadius={BorderRadius.full}
++                backgroundColor={BackgroundColor.backgroundMuted}
++                style={{ width: 48, height: 48 }}
++              >
++                <Icon name={IconName.Lock} size={IconSize.Lg} color={TextColor.iconAlternative} />
++              </Box>
+               <Text variant={TextVariant.bodyMdMedium}>
+-                No confidential tokens on this account
++                No confidential balances yet
+               </Text>
+               <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
+-                Scanned {NOX_CTOKENS.length} known ERC-7984 wrappers. Wrap some
+-                ERC-20 via the Shield action in the companion app, then refresh.
++                Scanned {NOX_CTOKENS.length} known ERC-7984 wrappers on Arbitrum
++                Sepolia. Use Shield above to wrap an ERC-20 into its
++                confidential equivalent.
+               </Text>
+             </Box>
+           );
