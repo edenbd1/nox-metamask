@@ -12,6 +12,7 @@
     "e2e:fork-decrypt": "ts-node --transpile-only scripts/e2e-fork-decrypt.ts",
     "e2e:fork-send": "ts-node --transpile-only scripts/e2e-fork-send.ts",
     "e2e:fork-native": "ts-node --transpile-only scripts/e2e-fork-native.ts",
+    "e2e:fork-activity": "ts-node --transpile-only scripts/e2e-fork-activity.ts",
     "e2e:all": "for s in e2e e2e:user e2e:unwrap-viewers e2e:fork-decrypt e2e:fork-send e2e:fork-native; do echo \"═══ $s ═══\"; pnpm run $s || exit 1; done"
   },
   "dependencies": {
