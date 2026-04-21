@@ -104,10 +104,18 @@ index d7c3298..d415e86 100644
   * Poll the Handle Gateway for publicDecrypt of a handle that has just been
   * marked publicly decryptable on-chain (e.g. the burn handle from unwrap).
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-index 61c1ab0..0a8dfd8 100644
+index 61c1ab0..6ea4edc 100644
 --- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -33,8 +33,10 @@ import {
+@@ -17,6 +17,7 @@ import {
+   BorderRadius,
+   Display,
+   FlexDirection,
++  IconColor,
+   JustifyContent,
+   TextColor,
+   TextVariant,
+@@ -33,8 +34,10 @@ import {
    encodeWrap,
    encryptUint256,
    fetchBalanceHandle,
@@ -118,7 +126,7 @@ index 61c1ab0..0a8dfd8 100644
  } from './nox-rpc';
  import { noxDecrypt } from './nox-client';
  
-@@ -190,12 +192,34 @@ type FlowStatus =
+@@ -190,12 +193,34 @@ type FlowStatus =
    | { status: 'done'; message: string }
    | { status: 'error'; message: string };
  
@@ -154,7 +162,7 @@ index 61c1ab0..0a8dfd8 100644
    return (
      <Box
        display={Display.Flex}
-@@ -204,13 +228,17 @@ function TokenLogo({ symbol }: { symbol: string }) {
+@@ -204,13 +229,17 @@ function TokenLogo({ symbol }: { symbol: string }) {
        borderRadius={BorderRadius.full}
        style={{
          width: 34, height: 34, position: 'relative',
@@ -177,7 +185,7 @@ index 61c1ab0..0a8dfd8 100644
        <Box
          display={Display.Flex}
          alignItems={AlignItems.center}
-@@ -220,7 +248,8 @@ function TokenLogo({ symbol }: { symbol: string }) {
+@@ -220,7 +249,8 @@ function TokenLogo({ symbol }: { symbol: string }) {
          style={{
            position: 'absolute', bottom: -3, right: -3,
            width: 16, height: 16,
@@ -187,7 +195,7 @@ index 61c1ab0..0a8dfd8 100644
          }}
        >
          <Icon name={IconName.Lock} size={IconSize.Xs} color={TextColor.iconDefault} />
-@@ -229,10 +258,98 @@ function TokenLogo({ symbol }: { symbol: string }) {
+@@ -229,10 +259,98 @@ function TokenLogo({ symbol }: { symbol: string }) {
    );
  }
  
@@ -220,11 +228,12 @@ index 61c1ab0..0a8dfd8 100644
 +      )}
 +
 +      {Array.isArray(activity) && activity.length > 0 && (
-+        <Box
-+          borderColor={BorderColor.borderMuted}
-+          borderRadius={BorderRadius.LG}
-+          display={Display.Flex}
-+          flexDirection={FlexDirection.Column}
++        <div
++          style={{
++            border: '1px solid var(--color-border-muted)',
++            borderRadius: 8,
++            overflow: 'hidden',
++          }}
 +        >
 +          {activity.map((ev, i) => {
 +            const tokenMeta = NOX_CTOKENS.find(
@@ -233,9 +242,10 @@ index 61c1ab0..0a8dfd8 100644
 +            const counterparty = ev.direction === 'out' ? ev.to : ev.from;
 +            const label = ev.direction === 'out' ? 'Sent' : 'Received';
 +            const prep = ev.direction === 'out' ? 'to' : 'from';
-+            const arrow = ev.direction === 'out' ? IconName.Arrow2UpRight : IconName.Arrow2Down;
-+            const color =
-+              ev.direction === 'out' ? TextColor.errorDefault : TextColor.successDefault;
++            const arrow =
++              ev.direction === 'out' ? IconName.Arrow2UpRight : IconName.Arrow2Down;
++            const arrowColor =
++              ev.direction === 'out' ? IconColor.errorDefault : IconColor.successDefault;
 +            return (
 +              <a
 +                key={`${ev.txHash}:${ev.direction}:${i}`}
@@ -243,37 +253,35 @@ index 61c1ab0..0a8dfd8 100644
 +                target="_blank"
 +                rel="noopener noreferrer"
 +                style={{
-+                  display: 'flex', alignItems: 'center', gap: 10,
++                  display: 'flex',
++                  alignItems: 'center',
++                  gap: 10,
 +                  padding: '10px 12px',
 +                  borderBottom:
 +                    i === activity.length - 1
 +                      ? 'none'
 +                      : '1px solid var(--color-border-muted)',
-+                  color: 'inherit', textDecoration: 'none',
++                  color: 'inherit',
++                  textDecoration: 'none',
 +                }}
 +              >
-+                <Icon name={arrow} size={IconSize.Sm} color={color} />
-+                <Box display={Display.Flex} flexDirection={FlexDirection.Column} style={{ flex: 1, minWidth: 0 }}>
-+                  <Text variant={TextVariant.bodySmMedium}>
++                <Icon name={arrow} size={IconSize.Sm} color={arrowColor} />
++                <div style={{ flex: 1, minWidth: 0 }}>
++                  <div style={{ fontSize: 13, fontWeight: 500 }}>
 +                    {label} {tokenMeta?.symbol ?? 'cToken'} {prep}{' '}
-+                    <Text
-+                      as="span"
-+                      variant={TextVariant.bodySmMedium}
-+                      color={TextColor.textAlternative}
-+                      style={{ fontFamily: 'monospace' }}
-+                    >
++                    <span style={{ fontFamily: 'monospace', color: 'var(--color-text-alternative)' }}>
 +                      {counterparty.slice(0, 6)}…{counterparty.slice(-4)}
-+                    </Text>
-+                  </Text>
-+                  <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
-+                    block #{ev.blockNumber.toLocaleString()} · encrypted amount
-+                  </Text>
-+                </Box>
-+                <Icon name={IconName.Export} size={IconSize.Xs} color={TextColor.iconMuted} />
++                    </span>
++                  </div>
++                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
++                    block #{String(ev.blockNumber)} · encrypted amount
++                  </div>
++                </div>
++                <Icon name={IconName.Export} size={IconSize.Xs} color={IconColor.iconMuted} />
 +              </a>
 +            );
 +          })}
-+        </Box>
++        </div>
 +      )}
 +    </Box>
 +  );
@@ -287,7 +295,7 @@ index 61c1ab0..0a8dfd8 100644
    boxSizing: 'border-box',
  };
  
-@@ -546,7 +663,7 @@ function CTokenCard({
+@@ -546,7 +664,7 @@ function CTokenCard({
        gap={2}
      >
        <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
@@ -296,7 +304,7 @@ index 61c1ab0..0a8dfd8 100644
          <Box display={Display.Flex} flexDirection={FlexDirection.Column}>
            <Text variant={TextVariant.bodyMdMedium}>
              {token.symbol} · {token.network}
-@@ -640,6 +757,25 @@ export default function PrivateBalanceTab() {
+@@ -640,6 +758,25 @@ export default function PrivateBalanceTab() {
    const [loads, setLoads] = useState<Record<string, LoadState>>({});
    const [reveals, setReveals] = useState<Record<string, RevealState>>({});
    const [refetchTick, setRefetchTick] = useState(0);
@@ -322,7 +330,7 @@ index 61c1ab0..0a8dfd8 100644
  
    useEffect(() => {
      if (!ownerAddress) return;
-@@ -876,6 +1012,8 @@ export default function PrivateBalanceTab() {
+@@ -876,6 +1013,8 @@ export default function PrivateBalanceTab() {
          ));
        })()}
  
