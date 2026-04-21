@@ -1,13 +1,315 @@
-diff --git a/ui/components/multichain/account-overview/account-overview-tabs.tsx b/ui/components/multichain/account-overview/account-overview-tabs.tsx
-index c695684..c4ae8ce 100644
---- a/ui/components/multichain/account-overview/account-overview-tabs.tsx
-+++ b/ui/components/multichain/account-overview/account-overview-tabs.tsx
-@@ -178,7 +178,7 @@ export const AccountOverviewTabs = ({
+diff --git a/ui/components/app/assets/private-balance-tab/nox-rpc.ts b/ui/components/app/assets/private-balance-tab/nox-rpc.ts
+index 9f3b324..9c9107b 100644
+--- a/ui/components/app/assets/private-balance-tab/nox-rpc.ts
++++ b/ui/components/app/assets/private-balance-tab/nox-rpc.ts
+@@ -1,6 +1,9 @@
+ const ARB_SEPOLIA_RPC = 'https://sepolia-rollup.arbitrum.io/rpc';
+ const ZERO_HANDLE = '0x' + '00'.repeat(32);
  
-       {showPrivateBalance && (
-         <Tab
--          name="Private balance"
-+          name="cTokens"
-           tabKey={AccountOverviewTabKey.PrivateBalance}
-           data-testid="account-overview__private-balance-tab"
++const HANDLE_GATEWAY =
++  'https://2e1800fc0dddeeadc189283ed1dce13c1ae28d48-3000.apps.ovh-tdx-dev.noxprotocol.dev';
++
+ export const NOX_DAPP_ORIGIN =
+   (globalThis as { VITE_NOX_APP_ORIGIN?: string }).VITE_NOX_APP_ORIGIN ||
+   'http://localhost:5180';
+@@ -59,3 +62,78 @@ export function buildDappDeepLink(
+   if (params.handle) q.set('handle', params.handle);
+   return `${base}?${q.toString()}`;
+ }
++
++/** POST /v0/secrets — encrypts an input via the Handle Gateway. No EIP-712
++ *  auth needed (ACL is enforced later on-chain via the inputProof). */
++export async function encryptUint256(
++  applicationContract: string,
++  owner: string,
++  amount: bigint,
++): Promise<{ handle: `0x${string}`; proof: `0x${string}` }> {
++  // Gateway expects the value encoded as 32-byte big-endian hex for uint256
++  const valueHex = '0x' + amount.toString(16).padStart(64, '0');
++  const res = await fetch(`${HANDLE_GATEWAY}/v0/secrets`, {
++    method: 'POST',
++    headers: { 'content-type': 'application/json' },
++    body: JSON.stringify({
++      value: valueHex,
++      solidityType: 'uint256',
++      applicationContract,
++      owner,
++    }),
++  });
++  if (!res.ok) {
++    throw new Error(`Gateway ${res.status}: ${await res.text()}`);
++  }
++  const json = (await res.json()) as { handle: string; proof: string };
++  return {
++    handle: json.handle as `0x${string}`,
++    proof: json.proof as `0x${string}`,
++  };
++}
++
++// ---- Calldata encoders (manual, no viem import to keep bundle small) -------
++
++function padAddress(addr: string): string {
++  return addr.toLowerCase().replace(/^0x/, '').padStart(64, '0');
++}
++function padUint(v: bigint): string {
++  return v.toString(16).padStart(64, '0');
++}
++function stripHex(h: string): string {
++  return h.replace(/^0x/, '');
++}
++
++export function encodeApprove(spender: string, amount: bigint): `0x${string}` {
++  // approve(address,uint256) selector
++  return ('0x095ea7b3' + padAddress(spender) + padUint(amount)) as `0x${string}`;
++}
++
++export function encodeWrap(to: string, amount: bigint): `0x${string}` {
++  // wrap(address,uint256) selector
++  return ('0xbf376c7a' + padAddress(to) + padUint(amount)) as `0x${string}`;
++}
++
++export function encodeConfidentialTransfer(
++  to: string,
++  handle: string,
++  inputProof: string,
++): `0x${string}` {
++  // confidentialTransfer(address,bytes32,bytes) selector
++  // Head: to (32) + handle (32) + offset-to-bytes (32 = 0x60)
++  // Tail: length(32) + data padded to 32-byte boundary
++  const proofHex = stripHex(inputProof);
++  const proofBytes = proofHex.length / 2;
++  const lengthHex = padUint(BigInt(proofBytes));
++  // pad proof data to next 32-byte boundary
++  const padCount = (64 - (proofHex.length % 64)) % 64;
++  const paddedProof = proofHex + '0'.repeat(padCount);
++  return (
++    '0x2fb74e62' +
++    padAddress(to) +
++    stripHex(handle) +
++    padUint(0x60n) +
++    lengthHex +
++    paddedProof
++  ) as `0x${string}`;
++}
+diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
+index 24b1a59..4259a93 100644
+--- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
++++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
+@@ -21,9 +21,13 @@ import {
+   TextColor,
+   TextVariant,
+ } from '../../../../helpers/constants/design-system';
+-import { getSelectedAddress } from '../../../../selectors';
++import { getSelectedAddress, getSelectedNetworkClientId } from '../../../../selectors';
++import { addTransaction } from '../../../../store/actions';
++import { TransactionType } from '@metamask/transaction-controller';
+ import {
+   buildDappDeepLink,
++  encodeConfidentialTransfer,
++  encryptUint256,
+   fetchBalanceHandle,
+ } from './nox-rpc';
+ import { noxDecrypt } from './nox-client';
+@@ -131,9 +135,25 @@ function shortHandle(h: string): string {
+   return `${h.slice(0, 10)}…${h.slice(-8)}`;
+ }
+ 
++function parseDecimalToRaw(input: string, decimals: number): bigint | null {
++  if (!/^\d+(\.\d+)?$/.test(input.trim())) return null;
++  const [whole, frac = ''] = input.trim().split('.');
++  if (frac.length > decimals) return null;
++  const padded = (frac + '0'.repeat(decimals)).slice(0, decimals);
++  return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(padded || '0');
++}
++
++type SendFormState =
++  | { status: 'closed' }
++  | { status: 'open' }
++  | { status: 'encrypting' }
++  | { status: 'submitting' }
++  | { status: 'done'; txHash?: string };
++
+ function CTokenCard({
+   token,
+   ownerAddress,
++  networkClientId,
+   load,
+   reveal,
+   onReveal,
+@@ -141,11 +161,17 @@ function CTokenCard({
+ }: {
+   token: (typeof NOX_CTOKENS)[number];
+   ownerAddress: string;
++  networkClientId: string;
+   load: LoadState;
+   reveal: RevealState;
+   onReveal: () => void;
+   onHide: () => void;
+ }) {
++  const [sendForm, setSendForm] = useState<SendFormState>({ status: 'closed' });
++  const [recipient, setRecipient] = useState('');
++  const [amount, setAmount] = useState('');
++  const [sendError, setSendError] = useState<string | null>(null);
++
+   const openDapp = useCallback(
+     (action: 'send' | 'shield') => {
+       const params: { token: string; handle?: string } = { token: token.address };
+@@ -155,6 +181,46 @@ function CTokenCard({
+     [load, token.address],
+   );
+ 
++  const openSend = useCallback(() => {
++    setRecipient('');
++    setAmount('');
++    setSendError(null);
++    setSendForm({ status: 'open' });
++  }, []);
++
++  const submitSend = useCallback(async () => {
++    setSendError(null);
++    if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
++      setSendError('Invalid recipient address');
++      return;
++    }
++    const raw = parseDecimalToRaw(amount, token.decimals);
++    if (raw === null || raw === 0n) {
++      setSendError('Invalid amount');
++      return;
++    }
++    try {
++      setSendForm({ status: 'encrypting' });
++      const { handle, proof } = await encryptUint256(token.address, ownerAddress, raw);
++      setSendForm({ status: 'submitting' });
++      const data = encodeConfidentialTransfer(recipient, handle, proof);
++      const txMeta = await addTransaction(
++        {
++          from: ownerAddress as `0x${string}`,
++          to: token.address as `0x${string}`,
++          data,
++          value: '0x0',
++          chainId: `0x${token.chainId.toString(16)}` as `0x${string}`,
++        } as Parameters<typeof addTransaction>[0],
++        { networkClientId, type: TransactionType.contractInteraction },
++      );
++      setSendForm({ status: 'done', txHash: txMeta.hash as string | undefined });
++    } catch (err) {
++      setSendError((err as Error).message);
++      setSendForm({ status: 'open' });
++    }
++  }, [recipient, amount, token.address, token.decimals, token.chainId, ownerAddress, networkClientId]);
++
+   let revealed: React.ReactNode;
+   if (load.status === 'loading') {
+     revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.textAlternative}>Loading…</Text>;
+@@ -251,8 +317,8 @@ function CTokenCard({
+           variant={ButtonVariant.Secondary}
+           size={ButtonSize.Sm}
+           startIconName={IconName.Arrow2UpRight}
+-          onClick={() => openDapp('send')}
+-          disabled={!canDecrypt}
++          onClick={openSend}
++          disabled={!canDecrypt || sendForm.status !== 'closed'}
          >
+           Send
+         </Button>
+@@ -273,12 +339,92 @@ function CTokenCard({
+           {isRevealed ? 'Hide' : isRevealing ? '…' : 'Decrypt'}
+         </Button>
+       </Box>
++
++      {sendForm.status !== 'closed' && (
++        <Box
++          marginTop={2}
++          padding={3}
++          backgroundColor={BackgroundColor.backgroundAlternative}
++          borderRadius={BorderRadius.MD}
++          display={Display.Flex}
++          flexDirection={FlexDirection.Column}
++          gap={2}
++        >
++          <Text variant={TextVariant.bodySmMedium}>Send confidentially</Text>
++          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
++            Recipient
++          </Text>
++          <input
++            value={recipient}
++            onChange={(e) => setRecipient(e.target.value)}
++            placeholder="0x…"
++            disabled={sendForm.status !== 'open'}
++            style={{
++              width: '100%', padding: '6px 8px', fontFamily: 'monospace',
++              fontSize: 12, background: 'transparent', color: 'inherit',
++              border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6,
++            }}
++          />
++          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
++            Amount ({token.underlyingSymbol})
++          </Text>
++          <input
++            value={amount}
++            onChange={(e) => setAmount(e.target.value)}
++            placeholder="0.50"
++            disabled={sendForm.status !== 'open'}
++            style={{
++              width: '100%', padding: '6px 8px', fontSize: 13,
++              background: 'transparent', color: 'inherit',
++              border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6,
++            }}
++          />
++          {sendForm.status === 'encrypting' && (
++            <Text variant={TextVariant.bodyXs} color={TextColor.textAlternative}>
++              Encrypting amount via Handle Gateway…
++            </Text>
++          )}
++          {sendForm.status === 'submitting' && (
++            <Text variant={TextVariant.bodyXs} color={TextColor.textAlternative}>
++              Submitting confidential transfer — approve in MetaMask…
++            </Text>
++          )}
++          {sendForm.status === 'done' && (
++            <Text variant={TextVariant.bodyXs} color={TextColor.successDefault}>
++              Sent. Check Activity tab for confirmation.
++            </Text>
++          )}
++          {sendError && (
++            <Text variant={TextVariant.bodyXs} color={TextColor.errorDefault}>
++              {sendError}
++            </Text>
++          )}
++          <Box display={Display.Flex} gap={2}>
++            <Button
++              variant={ButtonVariant.Primary}
++              size={ButtonSize.Sm}
++              onClick={submitSend}
++              disabled={sendForm.status !== 'open'}
++            >
++              {sendForm.status === 'done' ? 'Close' : 'Confirm'}
++            </Button>
++            <Button
++              variant={ButtonVariant.Secondary}
++              size={ButtonSize.Sm}
++              onClick={() => setSendForm({ status: 'closed' })}
++            >
++              Cancel
++            </Button>
++          </Box>
++        </Box>
++      )}
+     </Box>
+   );
+ }
+ 
+ export default function PrivateBalanceTab() {
+   const ownerAddress = useSelector(getSelectedAddress) as string | undefined;
++  const networkClientId = useSelector(getSelectedNetworkClientId) as string;
+   const [loads, setLoads] = useState<Record<string, LoadState>>({});
+   const [reveals, setReveals] = useState<Record<string, RevealState>>({});
+ 
+@@ -469,6 +615,7 @@ export default function PrivateBalanceTab() {
+             key={token.address}
+             token={token}
+             ownerAddress={ownerAddress ?? ''}
++            networkClientId={networkClientId}
+             load={loads[token.address] ?? { status: 'idle' }}
+             reveal={reveals[token.address] ?? { status: 'hidden' }}
+             onReveal={() => void revealToken(token.address)}
