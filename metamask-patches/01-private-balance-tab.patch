@@ -1,46 +1,75 @@
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-index 3607083..30a978f 100644
+index 30a978f..389e4ab 100644
 --- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -761,23 +761,24 @@ export default function PrivateBalanceTab() {
-   const [refetchTick, setRefetchTick] = useState(0);
-   const [activity, setActivity] = useState<TransferEvent[] | 'loading' | null>(null);
+@@ -210,53 +210,28 @@ function USDCGlyph() {
+   );
+ }
  
--  useEffect(() => {
--    if (!ownerAddress) return;
--    let cancelled = false;
--    setActivity('loading');
--    (async () => {
--      try {
--        const events = await fetchRecentTransfers(
--          ownerAddress,
--          NOX_CTOKENS.map((t) => t.address),
--        );
--        if (!cancelled) setActivity(events);
--      } catch {
--        if (!cancelled) setActivity([]);
--      }
--    })();
--    return () => { cancelled = true; };
--  }, [ownerAddress, refetchTick]);
-+  // TEMPORARILY DISABLED — bisecting activity crash
-+  // useEffect(() => {
-+  //   if (!ownerAddress) return;
-+  //   let cancelled = false;
-+  //   setActivity('loading');
-+  //   (async () => {
-+  //     try {
-+  //       const events = await fetchRecentTransfers(
-+  //         ownerAddress,
-+  //         NOX_CTOKENS.map((t) => t.address),
-+  //       );
-+  //       if (!cancelled) setActivity(events);
-+  //     } catch {
-+  //       if (!cancelled) setActivity([]);
-+  //     }
-+  //   })();
-+  //   return () => { cancelled = true; };
-+  // }, [ownerAddress, refetchTick]);
+-function TokenLogo({ symbol, underlyingSymbol }: { symbol: string; underlyingSymbol: string }) {
+-  const isUSDC = underlyingSymbol.toUpperCase() === 'USDC';
++function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
++  // Simplified: plain circle with the first letter. Previous version had an
++  // inline SVG glyph + a positioned lock badge which was crashing on render
++  // inside some React flows — reverted to the stable original.
+   const letter = symbol.replace(/^c/i, '').charAt(0).toUpperCase() || '?';
+-  // Derive a stable hue from the symbol so each cToken has its own color
+-  let hash = 0;
+-  for (let i = 0; i < symbol.length; i++) hash = (hash * 31 + symbol.charCodeAt(i)) >>> 0;
+-  const hue = hash % 360;
+-
+-  const background = isUSDC
+-    ? USDC_BLUE
+-    : `linear-gradient(135deg, hsl(${hue},75%,55%), hsl(${(hue + 40) % 360},70%,35%))`;
+-
+   return (
+-    <Box
+-      display={Display.Flex}
+-      alignItems={AlignItems.center}
+-      justifyContent={JustifyContent.center}
+-      borderRadius={BorderRadius.full}
++    <div
+       style={{
+-        width: 34, height: 34, position: 'relative',
+-        background,
+-        boxShadow: '0 2px 6px rgba(0,0,0,0.18)',
++        width: 32,
++        height: 32,
++        borderRadius: '50%',
++        display: 'flex',
++        alignItems: 'center',
++        justifyContent: 'center',
++        background: USDC_BLUE,
++        color: 'white',
++        fontSize: 14,
++        fontWeight: 600,
+       }}
+     >
+-      {isUSDC ? (
+-        <USDCGlyph />
+-      ) : (
+-        <span style={{ color: 'white', fontSize: 14, fontWeight: 600, letterSpacing: '-0.02em' }}>
+-          {letter}
+-        </span>
+-      )}
+-      <Box
+-        display={Display.Flex}
+-        alignItems={AlignItems.center}
+-        justifyContent={JustifyContent.center}
+-        backgroundColor={BackgroundColor.backgroundDefault}
+-        borderRadius={BorderRadius.full}
+-        style={{
+-          position: 'absolute', bottom: -3, right: -3,
+-          width: 16, height: 16,
+-          // Use MM design-system CSS var so the ring follows dark/light theme
+-          border: '1.5px solid var(--color-border-default)',
+-        }}
+-      >
+-        <Icon name={IconName.Lock} size={IconSize.Xs} color={TextColor.iconDefault} />
+-      </Box>
+-    </Box>
++      {letter}
++    </div>
+   );
+ }
  
-   useEffect(() => {
-     if (!ownerAddress) return;
