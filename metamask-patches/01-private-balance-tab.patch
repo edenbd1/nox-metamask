@@ -88,7 +88,7 @@ index 0000000..8e47d0a
 +  ts: number;
 +};
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-index 389e4ab..8cad3c8 100644
+index 389e4ab..aab754d 100644
 --- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 @@ -1,4 +1,4 @@
@@ -97,7 +97,7 @@ index 389e4ab..8cad3c8 100644
  import { useSelector } from 'react-redux';
  import {
    Box,
-@@ -17,7 +17,7 @@ import {
+@@ -17,14 +17,14 @@ import {
    BorderRadius,
    Display,
    FlexDirection,
@@ -106,6 +106,14 @@ index 389e4ab..8cad3c8 100644
    JustifyContent,
    TextColor,
    TextVariant,
+ } from '../../../../helpers/constants/design-system';
+ import { getSelectedAddress } from '../../../../selectors';
+ import { getSelectedNetworkClientId } from '../../../../../shared/lib/selectors/networks';
+-import { addTransaction } from '../../../../store/actions';
++import { addTransactionAndWaitForPublish } from '../../../../store/actions';
+ import { TransactionType } from '@metamask/transaction-controller';
+ import {
+   encodeAddViewer,
 @@ -35,12 +35,16 @@ import {
    encodeWrap,
    encryptUint256,
@@ -331,7 +339,7 @@ index 389e4ab..8cad3c8 100644
    onReveal: () => void;
    onHide: () => void;
    onBalanceChanged: () => void;
-@@ -460,6 +373,15 @@ function CTokenCard({
+@@ -460,16 +373,29 @@ function CTokenCard({
      setFlow({ status: 'idle' });
    }, []);
  
@@ -346,8 +354,24 @@ index 389e4ab..8cad3c8 100644
 +
    const dispatchTx = useCallback(
      async (to: string, data: `0x${string}`, type: TransactionType) => {
-       const txMeta = await addTransaction(
-@@ -607,7 +529,10 @@ function CTokenCard({
+-      const txMeta = await addTransaction(
++      // Use ...AndWaitForPublish (waitForSubmit: true) so txMeta.hash is set
++      // by the time we await — the plain addTransaction resolves pre-publish
++      // and would feed undefined to waitReceipt → 'invalid argument 0' RPC
++      // error from the public Arbitrum node.
++      const txMeta = await addTransactionAndWaitForPublish(
+         {
+           from: ownerAddress as `0x${string}`,
+           to: to as `0x${string}`,
+           data,
+           value: '0x0',
+           chainId: chainIdHex,
+-        } as Parameters<typeof addTransaction>[0],
++        } as Parameters<typeof addTransactionAndWaitForPublish>[0],
+         { networkClientId, type },
+       );
+       return txMeta.hash as string;
+@@ -607,7 +533,10 @@ function CTokenCard({
    } else if (load.status === 'ok') {
      revealed = (
        <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textDefault}>
@@ -359,7 +383,7 @@ index 389e4ab..8cad3c8 100644
        </Text>
      );
    } else {
-@@ -619,7 +544,13 @@ function CTokenCard({
+@@ -619,7 +548,13 @@ function CTokenCard({
        as="span"
        variant={TextVariant.bodyXs}
        color={TextColor.textMuted}
@@ -374,7 +398,7 @@ index 389e4ab..8cad3c8 100644
      >
        handle {shortHandle(load.handle)}
      </Text>
-@@ -640,8 +571,14 @@ function CTokenCard({
+@@ -640,8 +575,14 @@ function CTokenCard({
        gap={2}
      >
        <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
@@ -391,7 +415,7 @@ index 389e4ab..8cad3c8 100644
            <Text variant={TextVariant.bodyMdMedium}>
              {token.symbol} · {token.network}
            </Text>
-@@ -653,11 +590,35 @@ function CTokenCard({
+@@ -653,11 +594,35 @@ function CTokenCard({
          On-chain balance is encrypted.
        </Text>
  
@@ -431,7 +455,7 @@ index 389e4ab..8cad3c8 100644
          <Button
            variant={ButtonVariant.Secondary}
            size={ButtonSize.Sm}
-@@ -694,14 +655,6 @@ function CTokenCard({
+@@ -694,14 +659,6 @@ function CTokenCard({
          >
            Share
          </Button>
@@ -446,7 +470,7 @@ index 389e4ab..8cad3c8 100644
        </Box>
  
        {action !== null && (
-@@ -734,26 +687,41 @@ export default function PrivateBalanceTab() {
+@@ -734,26 +691,41 @@ export default function PrivateBalanceTab() {
    const [loads, setLoads] = useState<Record<string, LoadState>>({});
    const [reveals, setReveals] = useState<Record<string, RevealState>>({});
    const [refetchTick, setRefetchTick] = useState(0);
@@ -508,7 +532,7 @@ index 389e4ab..8cad3c8 100644
  
    useEffect(() => {
      if (!ownerAddress) return;
-@@ -778,12 +746,21 @@ export default function PrivateBalanceTab() {
+@@ -778,12 +750,21 @@ export default function PrivateBalanceTab() {
              // handle already (survives side-panel remount after signing).
              const key = cacheKey(ownerAddress, handle);
              const cached = await loadCachedValue(key);
@@ -531,7 +555,7 @@ index 389e4ab..8cad3c8 100644
              } else {
                // Surface any persisted error from a previous failed decrypt
                const storage = getSessionStorage();
-@@ -814,6 +791,42 @@ export default function PrivateBalanceTab() {
+@@ -814,6 +795,42 @@ export default function PrivateBalanceTab() {
      return () => { cancelled = true; };
    }, [ownerAddress, refetchTick]);
  
@@ -574,7 +598,7 @@ index 389e4ab..8cad3c8 100644
    const revealToken = useCallback(
      async (tokenAddress: string) => {
        if (!ownerAddress) return;
-@@ -830,16 +843,16 @@ export default function PrivateBalanceTab() {
+@@ -830,16 +847,16 @@ export default function PrivateBalanceTab() {
        }
  
        setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'signing' } }));
@@ -596,7 +620,7 @@ index 389e4ab..8cad3c8 100644
              return v;
            }).finally(() => {
              inflightDecrypts.delete(key);
-@@ -849,9 +862,7 @@ export default function PrivateBalanceTab() {
+@@ -849,9 +866,7 @@ export default function PrivateBalanceTab() {
          const value = await pending;
          setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value } }));
        } catch (err) {
@@ -607,7 +631,7 @@ index 389e4ab..8cad3c8 100644
          const storage = getSessionStorage();
          if (storage) {
            try { await storage.set({ [`${key}:error`]: (err as Error).message }); } catch { /* noop */ }
-@@ -882,7 +893,7 @@ export default function PrivateBalanceTab() {
+@@ -882,7 +897,7 @@ export default function PrivateBalanceTab() {
    }, [loads, revealToken]);
  
    return (
@@ -616,7 +640,7 @@ index 389e4ab..8cad3c8 100644
        <Box
          display={Display.Flex}
          justifyContent={JustifyContent.spaceBetween}
-@@ -932,6 +943,10 @@ export default function PrivateBalanceTab() {
+@@ -932,6 +947,10 @@ export default function PrivateBalanceTab() {
          });
          const held = NOX_CTOKENS.filter((t) => {
            const l = loads[t.address];
@@ -627,7 +651,7 @@ index 389e4ab..8cad3c8 100644
            return l?.status === 'ok' && !l.zero;
          });
  
-@@ -983,6 +998,10 @@ export default function PrivateBalanceTab() {
+@@ -983,6 +1002,10 @@ export default function PrivateBalanceTab() {
              networkClientId={networkClientId}
              load={loads[token.address] ?? { status: 'idle' }}
              reveal={reveals[token.address] ?? { status: 'hidden' }}
@@ -638,7 +662,7 @@ index 389e4ab..8cad3c8 100644
              onReveal={() => void revealToken(token.address)}
              onHide={() => hideToken(token.address)}
              onBalanceChanged={() => setRefetchTick((n) => n + 1)}
-@@ -990,8 +1009,6 @@ export default function PrivateBalanceTab() {
+@@ -990,8 +1013,6 @@ export default function PrivateBalanceTab() {
          ));
        })()}
  
@@ -764,10 +788,10 @@ index 0000000..4dd1304
 +export { default } from './shield';
 diff --git a/ui/pages/shield/shield.tsx b/ui/pages/shield/shield.tsx
 new file mode 100644
-index 0000000..4ec299b
+index 0000000..386fa76
 --- /dev/null
 +++ b/ui/pages/shield/shield.tsx
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,405 @@
 +// Full-screen Shield page: lets the user wrap a public ERC-20 (e.g. USDC)
 +// into its confidential ERC-7984 wrapper (e.g. cUSDC). Reached from the
 +// Shield IconButton on the asset detail page.
@@ -804,7 +828,7 @@ index 0000000..4ec299b
 +} from '../../components/component-library';
 +import { getSelectedAddress } from '../../selectors';
 +import { getSelectedNetworkClientId } from '../../../shared/lib/selectors/networks';
-+import { addTransaction } from '../../store/actions';
++import { addTransactionAndWaitForPublish } from '../../store/actions';
 +import {
 +  encodeApprove,
 +  encodeWrap,
@@ -913,14 +937,20 @@ index 0000000..4ec299b
 +  const dispatchTx = useCallback(
 +    async (to: string, data: `0x${string}`, type: TransactionType) => {
 +      if (!ownerAddress) throw new Error('No selected account');
-+      const txMeta = await addTransaction(
++      // addTransactionAndWaitForPublish (vs plain addTransaction) waits until
++      // the tx is actually broadcast — guaranteeing txMeta.hash is set when
++      // the promise resolves. Without this, we'd race against a pending hash
++      // and call eth_getTransactionReceipt(undefined), which the Arbitrum RPC
++      // rejects with: "invalid argument 0: json: cannot unmarshal non-string
++      // into Go value of type hexutil.Bytes".
++      const txMeta = await addTransactionAndWaitForPublish(
 +        {
 +          from: ownerAddress as `0x${string}`,
 +          to: to as `0x${string}`,
 +          data,
 +          value: '0x0',
 +          chainId: chainIdHex,
-+        } as Parameters<typeof addTransaction>[0],
++        } as Parameters<typeof addTransactionAndWaitForPublish>[0],
 +        { networkClientId, type },
 +      );
 +      return txMeta.hash as string;
