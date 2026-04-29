@@ -1,9 +1,9 @@
 diff --git a/ui/components/app/assets/private-balance-tab/nox-tokens.ts b/ui/components/app/assets/private-balance-tab/nox-tokens.ts
 new file mode 100644
-index 0000000..8e47d0a
+index 0000000..1c3bd1f
 --- /dev/null
 +++ b/ui/components/app/assets/private-balance-tab/nox-tokens.ts
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,99 @@
 +// Shared registry of known ERC-7984 confidential wrappers. Used by both the
 +// cTokens tab (to scan balances) and the asset detail page (to decide whether
 +// to show the Shield button on an ERC-20 like USDC or RLC).
@@ -87,8 +87,24 @@ index 0000000..8e47d0a
 +  chainId: number;
 +  ts: number;
 +};
++
++// Pending shield intent: the /shield page captures user input then writes
++// this and navigates to home/cTokens. The cTokens tab actually runs the
++// 2-step approve+wrap because IT lives on the home route and survives
++// MetaMask's post-confirmation redirect — whereas /shield gets unmounted
++// the moment the first popup is confirmed.
++export const PENDING_SHIELD_KEY = 'nox:pendingShield';
++export const PENDING_SHIELD_TTL_MS = 60_000;
++
++export type PendingShieldIntent = {
++  underlying: string;
++  wrapper: string;
++  chainId: number;
++  amountRaw: string; // bigint serialized; chrome.storage doesn't take bigint
++  ts: number;
++};
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-index 389e4ab..aab754d 100644
+index 389e4ab..e6487bd 100644
 --- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 @@ -1,4 +1,4 @@
@@ -114,7 +130,7 @@ index 389e4ab..aab754d 100644
  import { TransactionType } from '@metamask/transaction-controller';
  import {
    encodeAddViewer,
-@@ -35,12 +35,16 @@ import {
+@@ -35,12 +35,19 @@ import {
    encodeWrap,
    encryptUint256,
    fetchBalanceHandle,
@@ -128,12 +144,15 @@ index 389e4ab..aab754d 100644
 +  AUTO_OPEN_SHIELD_KEY,
 +  AUTO_OPEN_SHIELD_TTL_MS,
 +  NOX_CTOKENS,
++  PENDING_SHIELD_KEY,
++  PENDING_SHIELD_TTL_MS,
 +  type AutoOpenShieldIntent,
++  type PendingShieldIntent,
 +} from './nox-tokens';
  
  const NOX_COMPUTE: `0x${string}` = '0xd464B198f06756a1d00be223634b85E0a731c229';
  const ARB_SEPOLIA_RPC = 'https://sepolia-rollup.arbitrum.io/rpc';
-@@ -123,32 +127,41 @@ async function saveCachedValue(key: string, value: bigint): Promise<void> {
+@@ -123,32 +130,41 @@ async function saveCachedValue(key: string, value: bigint): Promise<void> {
    } catch { /* noop */ }
  }
  
@@ -201,7 +220,7 @@ index 389e4ab..aab754d 100644
  
  type LoadState =
    | { status: 'idle' }
-@@ -197,23 +210,7 @@ type FlowStatus =
+@@ -197,23 +213,7 @@ type FlowStatus =
  // USDC brand blue — displayed when the underlying is Circle's USDC
  const USDC_BLUE = '#2775CA';
  
@@ -226,7 +245,7 @@ index 389e4ab..aab754d 100644
    const letter = symbol.replace(/^c/i, '').charAt(0).toUpperCase() || '?';
    return (
      <div
-@@ -235,94 +232,6 @@ function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
+@@ -235,94 +235,6 @@ function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
    );
  }
  
@@ -321,7 +340,7 @@ index 389e4ab..aab754d 100644
  const inputStyle: React.CSSProperties = {
    width: '100%', padding: '7px 9px', fontSize: 12,
    background: 'transparent', color: 'inherit',
-@@ -425,6 +334,8 @@ function CTokenCard({
+@@ -425,6 +337,8 @@ function CTokenCard({
    networkClientId,
    load,
    reveal,
@@ -330,7 +349,7 @@ index 389e4ab..aab754d 100644
    onReveal,
    onHide,
    onBalanceChanged,
-@@ -434,6 +345,8 @@ function CTokenCard({
+@@ -434,6 +348,8 @@ function CTokenCard({
    networkClientId: string;
    load: LoadState;
    reveal: RevealState;
@@ -339,7 +358,7 @@ index 389e4ab..aab754d 100644
    onReveal: () => void;
    onHide: () => void;
    onBalanceChanged: () => void;
-@@ -460,16 +373,29 @@ function CTokenCard({
+@@ -460,16 +376,29 @@ function CTokenCard({
      setFlow({ status: 'idle' });
    }, []);
  
@@ -371,7 +390,7 @@ index 389e4ab..aab754d 100644
          { networkClientId, type },
        );
        return txMeta.hash as string;
-@@ -607,7 +533,10 @@ function CTokenCard({
+@@ -607,7 +536,10 @@ function CTokenCard({
    } else if (load.status === 'ok') {
      revealed = (
        <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textDefault}>
@@ -383,7 +402,7 @@ index 389e4ab..aab754d 100644
        </Text>
      );
    } else {
-@@ -619,7 +548,13 @@ function CTokenCard({
+@@ -619,7 +551,13 @@ function CTokenCard({
        as="span"
        variant={TextVariant.bodyXs}
        color={TextColor.textMuted}
@@ -398,7 +417,7 @@ index 389e4ab..aab754d 100644
      >
        handle {shortHandle(load.handle)}
      </Text>
-@@ -640,8 +575,14 @@ function CTokenCard({
+@@ -640,8 +578,14 @@ function CTokenCard({
        gap={2}
      >
        <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
@@ -415,7 +434,7 @@ index 389e4ab..aab754d 100644
            <Text variant={TextVariant.bodyMdMedium}>
              {token.symbol} · {token.network}
            </Text>
-@@ -653,11 +594,35 @@ function CTokenCard({
+@@ -653,11 +597,35 @@ function CTokenCard({
          On-chain balance is encrypted.
        </Text>
  
@@ -455,7 +474,7 @@ index 389e4ab..aab754d 100644
          <Button
            variant={ButtonVariant.Secondary}
            size={ButtonSize.Sm}
-@@ -694,14 +659,6 @@ function CTokenCard({
+@@ -694,14 +662,6 @@ function CTokenCard({
          >
            Share
          </Button>
@@ -470,7 +489,7 @@ index 389e4ab..aab754d 100644
        </Box>
  
        {action !== null && (
-@@ -734,26 +691,41 @@ export default function PrivateBalanceTab() {
+@@ -734,26 +694,160 @@ export default function PrivateBalanceTab() {
    const [loads, setLoads] = useState<Record<string, LoadState>>({});
    const [reveals, setReveals] = useState<Record<string, RevealState>>({});
    const [refetchTick, setRefetchTick] = useState(0);
@@ -500,6 +519,18 @@ index 389e4ab..aab754d 100644
 +  // the matching CTokenCard which auto-opens its Shield form.
 +  const [autoOpen, setAutoOpen] = useState<{ tokenAddress: string; action: Action } | null>(null);
 +
++  // Pending Shield intent: the /shield page captured the user's amount,
++  // wrote it to storage, and navigated here. We run the proven sequential
++  // approve→wait→wrap→wait flow from here because this tab is part of the
++  // home route (where MetaMask sends the user after each popup confirm),
++  // so it doesn't unmount mid-flow.
++  type ShieldExec =
++    | { status: 'idle' }
++    | { status: 'busy'; label: string; underlyingSymbol: string; amount: string; symbol: string }
++    | { status: 'done'; message: string }
++    | { status: 'error'; message: string };
++  const [shieldExec, setShieldExec] = useState<ShieldExec>({ status: 'idle' });
++
 +  useEffect(() => {
 +    const storage = getSessionStorage();
 +    if (!storage) return;
@@ -525,6 +556,113 @@ index 389e4ab..aab754d 100644
 +    return () => { cancelled = true; };
 +  }, []);
 +
++  // Consume PENDING_SHIELD_KEY: run the actual approve+wrap flow.
++  // Uses addTransactionAndWaitForPublish so the hash is set before we
++  // await its receipt. Sequential — this tab is on home, doesn't unmount.
++  useEffect(() => {
++    if (!ownerAddress || !networkClientId) return;
++    const storage = getSessionStorage();
++    if (!storage) return;
++    let cancelled = false;
++    (async () => {
++      try {
++        const out = await storage.get(PENDING_SHIELD_KEY);
++        const raw = out[PENDING_SHIELD_KEY] as PendingShieldIntent | undefined;
++        if (!raw || cancelled) return;
++        if (Date.now() - raw.ts > PENDING_SHIELD_TTL_MS) return;
++        const match = NOX_CTOKENS.find(
++          (t) =>
++            t.underlying.toLowerCase() === raw.underlying.toLowerCase() &&
++            t.chainId === raw.chainId,
++        );
++        // Clear the intent up-front so a re-mount doesn't kick off a
++        // duplicate flow.
++        const removable = (storage as unknown as { remove?: (k: string) => Promise<void> }).remove;
++        if (removable) {
++          try { await removable.call(storage, PENDING_SHIELD_KEY); } catch { /* noop */ }
++        }
++        if (!match) return;
++
++        const rawAmount = BigInt(raw.amountRaw);
++        const formatted = formatAmount(rawAmount, match.decimals);
++        const chainIdHex = `0x${match.chainId.toString(16)}` as `0x${string}`;
++
++        setShieldExec({
++          status: 'busy',
++          label: `1/2 Approving ${formatted} ${match.underlyingSymbol} — sign in MetaMask…`,
++          underlyingSymbol: match.underlyingSymbol,
++          amount: formatted,
++          symbol: match.symbol,
++        });
++
++        // Step 1: approve
++        const approveData = encodeApprove(match.address, rawAmount);
++        const approveMeta = await addTransactionAndWaitForPublish(
++          {
++            from: ownerAddress as `0x${string}`,
++            to: match.underlying as `0x${string}`,
++            data: approveData,
++            value: '0x0',
++            chainId: chainIdHex,
++          } as Parameters<typeof addTransactionAndWaitForPublish>[0],
++          { networkClientId, type: TransactionType.tokenMethodApprove },
++        );
++        if (cancelled) return;
++        setShieldExec({
++          status: 'busy',
++          label: '1/2 Waiting for approval to mine…',
++          underlyingSymbol: match.underlyingSymbol,
++          amount: formatted,
++          symbol: match.symbol,
++        });
++        await waitReceipt(approveMeta.hash as string);
++        if (cancelled) return;
++
++        // Step 2: wrap
++        setShieldExec({
++          status: 'busy',
++          label: `2/2 Wrapping ${formatted} ${match.underlyingSymbol} → ${match.symbol} — sign in MetaMask…`,
++          underlyingSymbol: match.underlyingSymbol,
++          amount: formatted,
++          symbol: match.symbol,
++        });
++        const wrapData = encodeWrap(ownerAddress, rawAmount);
++        const wrapMeta = await addTransactionAndWaitForPublish(
++          {
++            from: ownerAddress as `0x${string}`,
++            to: match.address as `0x${string}`,
++            data: wrapData,
++            value: '0x0',
++            chainId: chainIdHex,
++          } as Parameters<typeof addTransactionAndWaitForPublish>[0],
++          { networkClientId, type: TransactionType.contractInteraction },
++        );
++        if (cancelled) return;
++        setShieldExec({
++          status: 'busy',
++          label: '2/2 Waiting for wrap to mine…',
++          underlyingSymbol: match.underlyingSymbol,
++          amount: formatted,
++          symbol: match.symbol,
++        });
++        await waitReceipt(wrapMeta.hash as string);
++        if (cancelled) return;
++
++        setShieldExec({
++          status: 'done',
++          message: `Shielded ${formatted} ${match.underlyingSymbol} → ${match.symbol}`,
++        });
++        // Trigger a balance refetch so the new cToken handle shows up.
++        setRefetchTick((n) => n + 1);
++      } catch (err) {
++        if (!cancelled) {
++          setShieldExec({ status: 'error', message: (err as Error).message });
++        }
++      }
++    })();
++    return () => { cancelled = true; };
++  }, [ownerAddress, networkClientId]);
++
 +  // Stable ref so the storage-change listener can read latest handles
 +  // without re-subscribing on every loads update.
 +  const loadsRef = useRef(loads);
@@ -532,7 +670,7 @@ index 389e4ab..aab754d 100644
  
    useEffect(() => {
      if (!ownerAddress) return;
-@@ -778,12 +750,21 @@ export default function PrivateBalanceTab() {
+@@ -778,12 +872,21 @@ export default function PrivateBalanceTab() {
              // handle already (survives side-panel remount after signing).
              const key = cacheKey(ownerAddress, handle);
              const cached = await loadCachedValue(key);
@@ -555,7 +693,7 @@ index 389e4ab..aab754d 100644
              } else {
                // Surface any persisted error from a previous failed decrypt
                const storage = getSessionStorage();
-@@ -814,6 +795,42 @@ export default function PrivateBalanceTab() {
+@@ -814,6 +917,42 @@ export default function PrivateBalanceTab() {
      return () => { cancelled = true; };
    }, [ownerAddress, refetchTick]);
  
@@ -598,7 +736,7 @@ index 389e4ab..aab754d 100644
    const revealToken = useCallback(
      async (tokenAddress: string) => {
        if (!ownerAddress) return;
-@@ -830,16 +847,16 @@ export default function PrivateBalanceTab() {
+@@ -830,16 +969,16 @@ export default function PrivateBalanceTab() {
        }
  
        setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'signing' } }));
@@ -620,7 +758,7 @@ index 389e4ab..aab754d 100644
              return v;
            }).finally(() => {
              inflightDecrypts.delete(key);
-@@ -849,9 +866,7 @@ export default function PrivateBalanceTab() {
+@@ -849,9 +988,7 @@ export default function PrivateBalanceTab() {
          const value = await pending;
          setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value } }));
        } catch (err) {
@@ -631,16 +769,48 @@ index 389e4ab..aab754d 100644
          const storage = getSessionStorage();
          if (storage) {
            try { await storage.set({ [`${key}:error`]: (err as Error).message }); } catch { /* noop */ }
-@@ -882,7 +897,7 @@ export default function PrivateBalanceTab() {
+@@ -882,7 +1019,39 @@ export default function PrivateBalanceTab() {
    }, [loads, revealToken]);
  
    return (
 -    <Box padding={4}>
 +    <Box padding={4} style={{ overflowX: 'hidden', maxWidth: '100%' }}>
++      {shieldExec.status !== 'idle' && (
++        <Box
++          padding={3}
++          marginBottom={3}
++          borderRadius={BorderRadius.LG}
++          borderColor={BorderColor.borderMuted}
++          display={Display.Flex}
++          flexDirection={FlexDirection.Column}
++          gap={1}
++        >
++          <Text variant={TextVariant.bodySmMedium}>
++            {shieldExec.status === 'busy' && 'Shielding…'}
++            {shieldExec.status === 'done' && 'Shield complete'}
++            {shieldExec.status === 'error' && 'Shield failed'}
++          </Text>
++          <Text
++            variant={TextVariant.bodyXs}
++            color={
++              shieldExec.status === 'error'
++                ? TextColor.errorDefault
++                : shieldExec.status === 'done'
++                  ? TextColor.successDefault
++                  : TextColor.textAlternative
++            }
++          >
++            {shieldExec.status === 'busy' && shieldExec.label}
++            {shieldExec.status === 'done' && shieldExec.message}
++            {shieldExec.status === 'error' && shieldExec.message}
++          </Text>
++        </Box>
++      )}
++
        <Box
          display={Display.Flex}
          justifyContent={JustifyContent.spaceBetween}
-@@ -932,6 +947,10 @@ export default function PrivateBalanceTab() {
+@@ -932,6 +1101,10 @@ export default function PrivateBalanceTab() {
          });
          const held = NOX_CTOKENS.filter((t) => {
            const l = loads[t.address];
@@ -651,7 +821,7 @@ index 389e4ab..aab754d 100644
            return l?.status === 'ok' && !l.zero;
          });
  
-@@ -983,6 +1002,10 @@ export default function PrivateBalanceTab() {
+@@ -983,6 +1156,10 @@ export default function PrivateBalanceTab() {
              networkClientId={networkClientId}
              load={loads[token.address] ?? { status: 'idle' }}
              reveal={reveals[token.address] ?? { status: 'hidden' }}
@@ -662,7 +832,7 @@ index 389e4ab..aab754d 100644
              onReveal={() => void revealToken(token.address)}
              onHide={() => hideToken(token.address)}
              onBalanceChanged={() => setRefetchTick((n) => n + 1)}
-@@ -990,8 +1013,6 @@ export default function PrivateBalanceTab() {
+@@ -990,8 +1167,6 @@ export default function PrivateBalanceTab() {
          ));
        })()}
  
@@ -788,10 +958,10 @@ index 0000000..4dd1304
 +export { default } from './shield';
 diff --git a/ui/pages/shield/shield.tsx b/ui/pages/shield/shield.tsx
 new file mode 100644
-index 0000000..706ab10
+index 0000000..92fbdeb
 --- /dev/null
 +++ b/ui/pages/shield/shield.tsx
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,370 @@
 +// Full-screen Shield page: lets the user wrap a public ERC-20 (e.g. USDC)
 +// into its confidential ERC-7984 wrapper (e.g. cUSDC). Reached from the
 +// Shield IconButton on the asset detail page.
@@ -802,7 +972,6 @@ index 0000000..706ab10
 +import React, { useCallback, useEffect, useMemo, useState } from 'react';
 +import { useSelector } from 'react-redux';
 +import { useNavigate, useSearchParams } from 'react-router-dom';
-+import { TransactionType } from '@metamask/transaction-controller';
 +import {
 +  AlignItems,
 +  BackgroundColor,
@@ -827,14 +996,10 @@ index 0000000..706ab10
 +  Text,
 +} from '../../components/component-library';
 +import { getSelectedAddress } from '../../selectors';
-+import { getSelectedNetworkClientId } from '../../../shared/lib/selectors/networks';
-+import { addTransactionAndWaitForPublish } from '../../store/actions';
-+import {
-+  encodeApprove,
-+  encodeWrap,
-+} from '../../components/app/assets/private-balance-tab/nox-rpc';
 +import {
 +  findWrapperByUnderlying,
++  PENDING_SHIELD_KEY,
++  type PendingShieldIntent,
 +} from '../../components/app/assets/private-balance-tab/nox-tokens';
 +import { setDefaultHomeActiveTabName } from '../../store/actions';
 +import { AccountOverviewTabKey } from '../../../shared/constants/app-state';
@@ -892,7 +1057,6 @@ index 0000000..706ab10
 +  const navigate = useNavigate();
 +  const [searchParams] = useSearchParams();
 +  const ownerAddress = useSelector(getSelectedAddress) as string | undefined;
-+  const networkClientId = useSelector(getSelectedNetworkClientId) as string;
 +
 +  const assetParam = searchParams.get('asset')?.toLowerCase() ?? '';
 +  const chainIdParam = searchParams.get('chainId') ?? '';
@@ -917,16 +1081,12 @@ index 0000000..706ab10
 +    return () => { cancelled = true; };
 +  }, [wrapper, ownerAddress]);
 +
-+  const chainIdHex = wrapper
-+    ? (`0x${wrapper.chainId.toString(16)}` as `0x${string}`)
-+    : ('0x0' as `0x${string}`);
-+
 +  const onMax = useCallback(() => {
 +    if (!wrapper || balance === null) return;
 +    setAmount(formatAmount(balance, wrapper.decimals));
 +  }, [balance, wrapper]);
 +
-+  const onContinue = useCallback(() => {
++  const onContinue = useCallback(async () => {
 +    if (!wrapper || !ownerAddress) return;
 +    const raw = parseDecimalToRaw(amount, wrapper.decimals);
 +    if (raw === null || raw === 0n) {
@@ -938,73 +1098,54 @@ index 0000000..706ab10
 +      return;
 +    }
 +
-+    // CRITICAL lifecycle detail: when the user confirms the first popup,
-+    // MetaMask navigates the wallet UI back to '/'. That unmounts this
-+    // /shield page, which would kill any await between step 1 and step 2,
-+    // so step 2 (the wrap) would never be sent.
++    // ARCHITECTURE NOTE — why we don't fire txs from here:
 +    //
-+    // Fix: fire BOTH addTransactionAndWaitForPublish calls synchronously,
-+    // in the same JS tick. Both submitRequestToBackground messages reach
-+    // the TransactionController before any popup appears, so both popups
-+    // are queued. Even if our component unmounts mid-sign, popup 2 (wrap)
-+    // is already in MetaMask's confirmation queue and will appear after
-+    // the user confirms popup 1 (approve). Nonce assignment and on-chain
-+    // execution order are preserved because the two addTransaction calls
-+    // are dispatched in submission order.
++    // MetaMask's TransactionController, after the user confirms a popup
++    // initiated by addTransaction(...) with origin: ORIGIN_METAMASK,
++    // navigates the wallet UI back to '/'. That unmounts /shield, killing
++    // any in-flight await for the second tx. Two failure modes we hit:
++    //   (1) Sequential awaits: step 2 (wrap) never runs after step 1
++    //       (approve) because the page is gone before the next await
++    //       resumes.
++    //   (2) Parallel addTransactionAndWaitForPublish: both txs share the
++    //       same gas estimation snapshot taken at submit time. Arbitrum
++    //       Sepolia's base fee jiggles by ~10-30k wei during the user's
++    //       signing window, and MetaMask's tight maxFeePerGas (only ~2k
++    //       wei above baseFee) gets rejected by the public RPC with
++    //       "max fee per gas less than block base fee".
++    //
++    // Fix: this page is now UI-only. We persist a PendingShieldIntent and
++    // navigate to home → cTokens tab. The cTokens tab is rendered inside
++    // the home route, which is exactly where MetaMask redirects after a
++    // popup confirmation, so it doesn't unmount during the 2-step flow.
++    // It picks up the intent on mount and runs the proven sequential
++    // approve→await→wrap→await flow that already works for the inline
++    // shield form on cTokens cards.
 +
-+    // Pre-select the cTokens tab so the user lands there after confirming
-+    // (since MetaMask sends them home).
-+    void setDefaultHomeActiveTabName(AccountOverviewTabKey.PrivateBalance);
++    const intent: PendingShieldIntent = {
++      underlying: wrapper.underlying,
++      wrapper: wrapper.address,
++      chainId: wrapper.chainId,
++      amountRaw: raw.toString(),
++      ts: Date.now(),
++    };
 +
-+    setFlow({
-+      status: 'busy',
-+      label: 'Sign 2 transactions in MetaMask (approve, then wrap)…',
-+    });
++    try {
++      const chromeRef = (
++        globalThis as { chrome?: { storage?: { session?: { set: (i: Record<string, unknown>) => Promise<void> } } } }
++      ).chrome;
++      const session = chromeRef?.storage?.session;
++      if (session) {
++        await session.set({ [PENDING_SHIELD_KEY]: intent });
++      }
++    } catch {
++      /* noop — falls back to no-intent, user lands on cTokens with no auto-action */
++    }
 +
-+    const approveData = encodeApprove(wrapper.address, raw);
-+    const wrapData = encodeWrap(ownerAddress, raw);
-+
-+    const approveP = addTransactionAndWaitForPublish(
-+      {
-+        from: ownerAddress as `0x${string}`,
-+        to: wrapper.underlying as `0x${string}`,
-+        data: approveData,
-+        value: '0x0',
-+        chainId: chainIdHex,
-+      } as Parameters<typeof addTransactionAndWaitForPublish>[0],
-+      { networkClientId, type: TransactionType.tokenMethodApprove },
-+    );
-+    const wrapP = addTransactionAndWaitForPublish(
-+      {
-+        from: ownerAddress as `0x${string}`,
-+        to: wrapper.address as `0x${string}`,
-+        data: wrapData,
-+        value: '0x0',
-+        chainId: chainIdHex,
-+      } as Parameters<typeof addTransactionAndWaitForPublish>[0],
-+      { networkClientId, type: TransactionType.contractInteraction },
-+    );
-+
-+    Promise.all([approveP, wrapP])
-+      .then(() => {
-+        setFlow({
-+          status: 'done',
-+          message: `Shielded ${amount} ${wrapper.underlyingSymbol} → ${wrapper.symbol}`,
-+        });
-+        setTimeout(() => navigate('/'), 1_500);
-+      })
-+      .catch((err) => {
-+        setFlow({ status: 'error', message: (err as Error).message });
-+      });
-+  }, [
-+    amount,
-+    balance,
-+    wrapper,
-+    ownerAddress,
-+    chainIdHex,
-+    networkClientId,
-+    navigate,
-+  ]);
++    // Pre-select the cTokens tab so the user lands there.
++    await setDefaultHomeActiveTabName(AccountOverviewTabKey.PrivateBalance);
++    navigate('/');
++  }, [amount, balance, wrapper, ownerAddress, navigate]);
 +
 +  if (!wrapper) {
 +    return (
