@@ -647,33 +647,39 @@ index 389e4ab..8cad3c8 100644
        <Box marginTop={4}>
          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
            Auto-discovered by scanning {NOX_CTOKENS.length} known ERC-7984
+diff --git a/ui/helpers/constants/routes.ts b/ui/helpers/constants/routes.ts
+index 75410d8..20a9d46 100644
+--- a/ui/helpers/constants/routes.ts
++++ b/ui/helpers/constants/routes.ts
+@@ -104,6 +104,7 @@ export const NEW_ACCOUNT_ROUTE = '/new-account';
+ export const CONFIRM_ADD_SUGGESTED_NFT_ROUTE = '/confirm-add-suggested-nft';
+ export const CONNECT_HARDWARE_ROUTE = '/new-account/connect';
+ export const SEND_ROUTE = '/send';
++export const SHIELD_ROUTE = '/shield';
+ export const REMOTE_ROUTE = '/remote';
+ export const REMOTE_ROUTE_SETUP_SWAPS = '/remote/setup-swaps';
+ export const REMOTE_ROUTE_SETUP_DAILY_ALLOWANCE =
 diff --git a/ui/pages/asset/components/token-buttons.tsx b/ui/pages/asset/components/token-buttons.tsx
-index 4e4afb5..349ed75 100644
+index 4e4afb5..bc113a5 100644
 --- a/ui/pages/asset/components/token-buttons.tsx
 +++ b/ui/pages/asset/components/token-buttons.tsx
-@@ -32,6 +32,13 @@ import { getIsNativeTokenBuyable } from '../../../ducks/ramps';
+@@ -32,6 +32,8 @@ import { getIsNativeTokenBuyable } from '../../../ducks/ramps';
  import { Asset } from '../types/asset';
  import { navigateToSendRoute } from '../../confirmations/utils/send';
  import { isEvmChainId } from '../../../../shared/lib/asset-utils';
-+import {
-+  hasConfidentialWrapper,
-+  AUTO_OPEN_SHIELD_KEY,
-+  type AutoOpenShieldIntent,
-+} from '../../../components/app/assets/private-balance-tab/nox-tokens';
-+import { setDefaultHomeActiveTabName } from '../../../store/actions';
-+import { AccountOverviewTabKey } from '../../../../shared/constants/app-state';
++import { hasConfidentialWrapper } from '../../../components/app/assets/private-balance-tab/nox-tokens';
++import { SHIELD_ROUTE } from '../../../helpers/constants/routes';
  
  const TokenButtons = ({
    token,
-@@ -124,6 +131,40 @@ const TokenButtons = ({
+@@ -124,6 +126,28 @@ const TokenButtons = ({
      openBridgeExperience(MetaMetricsSwapsEventSource.TokenView, token);
    }, [token, openBridgeExperience]);
  
 +  // Shield button: only visible when this ERC-20 has a registered confidential
-+  // wrapper (e.g. USDC -> cUSDC). Click writes an autoOpen intent to
-+  // chrome.storage.session, switches the home tab to cTokens, and navigates
-+  // back to the wallet home where the cTokens tab auto-opens the Shield form
-+  // on the matching CTokenCard.
++  // wrapper (e.g. USDC -> cUSDC). Click navigates to a dedicated full-screen
++  // Shield page where the user enters an amount and approves+wraps in two
++  // steps. Page reads ?asset=<underlying>&chainId=<hex> from the URL.
 +  const tokenChainIdNum = (() => {
 +    try {
 +      return parseInt(token.chainId.toString().replace(/^0x/, ''), 16);
@@ -684,29 +690,18 @@ index 4e4afb5..349ed75 100644
 +  const canShield =
 +    !token.isERC721 && hasConfidentialWrapper(token.address, tokenChainIdNum);
 +
-+  const handleShieldOnClick = useCallback(async () => {
-+    try {
-+      const chromeRef = (
-+        globalThis as { chrome?: { storage?: { session?: { set: (i: Record<string, unknown>) => Promise<void> } } } }
-+      ).chrome;
-+      const session = chromeRef?.storage?.session;
-+      if (session && tokenChainIdNum !== undefined) {
-+        const intent: AutoOpenShieldIntent = {
-+          underlying: token.address,
-+          chainId: tokenChainIdNum,
-+          ts: Date.now(),
-+        };
-+        await session.set({ [AUTO_OPEN_SHIELD_KEY]: intent });
-+      }
-+    } catch { /* noop */ }
-+    await setDefaultHomeActiveTabName(AccountOverviewTabKey.PrivateBalance);
-+    navigate('/');
-+  }, [navigate, token.address, tokenChainIdNum]);
++  const handleShieldOnClick = useCallback(() => {
++    const qs = new URLSearchParams({
++      asset: token.address,
++      chainId: token.chainId,
++    });
++    navigate(`${SHIELD_ROUTE}?${qs.toString()}`);
++  }, [navigate, token.address, token.chainId]);
 +
    return (
      <Box
        display={Display.Flex}
-@@ -179,6 +220,22 @@ const TokenButtons = ({
+@@ -179,6 +203,22 @@ const TokenButtons = ({
          label={t('swap')}
          disabled={!isExternalServicesEnabled || isMarketClosed}
        />
@@ -729,3 +724,446 @@ index 4e4afb5..349ed75 100644
      </Box>
    );
  };
+diff --git a/ui/pages/routes/routes.component.tsx b/ui/pages/routes/routes.component.tsx
+index 871b406..9335773 100644
+--- a/ui/pages/routes/routes.component.tsx
++++ b/ui/pages/routes/routes.component.tsx
+@@ -29,6 +29,7 @@ import {
+   RESTORE_VAULT_ROUTE,
+   REVEAL_SEED_ROUTE,
+   SEND_ROUTE,
++  SHIELD_ROUTE,
+   LEGACY_SETTINGS_V2_ROUTE,
+   SETTINGS_ROUTE,
+   UNLOCK_ROUTE,
+@@ -163,6 +164,7 @@ const ConfirmDecryptMessage = mmLazy(
+ );
+ const Confirm = mmLazy(() => import('../confirmations/confirm/confirm.tsx'));
+ const SendPage = mmLazy(() => import('../confirmations/send/index.ts'));
++const ShieldPage = mmLazy(() => import('../shield/index.ts'));
+ const CrossChainSwap = mmLazy(() => import('../bridge/index.tsx'));
+ const PermissionsConnect = mmLazy(
+   () => import('../permissions-connect/index.js'),
+@@ -311,6 +313,10 @@ export const routeConfig = [
+         path: `${SEND_ROUTE}/:page?`,
+         element: <SendPage />,
+       },
++      {
++        path: SHIELD_ROUTE,
++        element: <ShieldPage />,
++      },
+       {
+         path: `${CONFIRM_TRANSACTION_ROUTE}/:id?${DECRYPT_MESSAGE_REQUEST_PATH}`,
+         element: <ConfirmDecryptMessage />,
+diff --git a/ui/pages/shield/index.ts b/ui/pages/shield/index.ts
+new file mode 100644
+index 0000000..4dd1304
+--- /dev/null
++++ b/ui/pages/shield/index.ts
+@@ -0,0 +1 @@
++export { default } from './shield';
+diff --git a/ui/pages/shield/shield.tsx b/ui/pages/shield/shield.tsx
+new file mode 100644
+index 0000000..4ec299b
+--- /dev/null
++++ b/ui/pages/shield/shield.tsx
+@@ -0,0 +1,399 @@
++// Full-screen Shield page: lets the user wrap a public ERC-20 (e.g. USDC)
++// into its confidential ERC-7984 wrapper (e.g. cUSDC). Reached from the
++// Shield IconButton on the asset detail page.
++//
++// Structure mirrors the Send page (sticky header, centered token icon,
++// amount input with Max, Continue button at the bottom).
++
++import React, { useCallback, useEffect, useMemo, useState } from 'react';
++import { useSelector } from 'react-redux';
++import { useNavigate, useSearchParams } from 'react-router-dom';
++import { TransactionType } from '@metamask/transaction-controller';
++import {
++  AlignItems,
++  BackgroundColor,
++  BlockSize,
++  BorderColor,
++  BorderRadius,
++  Display,
++  FlexDirection,
++  IconColor,
++  JustifyContent,
++  TextColor,
++  TextVariant,
++} from '../../helpers/constants/design-system';
++import {
++  Box,
++  Button,
++  ButtonSize,
++  ButtonVariant,
++  Icon,
++  IconName,
++  IconSize,
++  Text,
++} from '../../components/component-library';
++import { getSelectedAddress } from '../../selectors';
++import { getSelectedNetworkClientId } from '../../../shared/lib/selectors/networks';
++import { addTransaction } from '../../store/actions';
++import {
++  encodeApprove,
++  encodeWrap,
++} from '../../components/app/assets/private-balance-tab/nox-rpc';
++import {
++  findWrapperByUnderlying,
++} from '../../components/app/assets/private-balance-tab/nox-tokens';
++import { setDefaultHomeActiveTabName } from '../../store/actions';
++import { AccountOverviewTabKey } from '../../../shared/constants/app-state';
++
++const ARB_SEPOLIA_RPC = 'https://sepolia-rollup.arbitrum.io/rpc';
++
++async function rpcCall<T = unknown>(method: string, params: unknown[]): Promise<T> {
++  const res = await fetch(ARB_SEPOLIA_RPC, {
++    method: 'POST',
++    headers: { 'content-type': 'application/json' },
++    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
++  });
++  const json = (await res.json()) as { result?: T; error?: { message: string } };
++  if (json.error) throw new Error(json.error.message);
++  return json.result as T;
++}
++
++const BALANCE_OF_SELECTOR = '0x70a08231';
++function encodeBalanceOf(owner: string): string {
++  return BALANCE_OF_SELECTOR + owner.replace(/^0x/, '').padStart(64, '0');
++}
++
++async function fetchErc20Balance(token: string, owner: string): Promise<bigint> {
++  const data = encodeBalanceOf(owner);
++  const hex = await rpcCall<string>('eth_call', [{ to: token, data }, 'latest']);
++  if (!hex || hex === '0x') return 0n;
++  return BigInt(hex);
++}
++
++async function waitReceipt(txHash: string, { timeoutMs = 60_000 } = {}) {
++  const t0 = Date.now();
++  while (Date.now() - t0 < timeoutMs) {
++    const result = await rpcCall<null | { status: string }>(
++      'eth_getTransactionReceipt',
++      [txHash],
++    );
++    if (result) return result;
++    await new Promise((r) => setTimeout(r, 2_000));
++  }
++  throw new Error(`Receipt timeout for ${txHash}`);
++}
++
++function formatAmount(v: bigint, decimals: number): string {
++  if (v === 0n) return '0';
++  const unit = 10n ** BigInt(decimals);
++  const whole = v / unit;
++  const frac = v % unit;
++  if (frac === 0n) return whole.toString();
++  const fracStr = frac.toString().padStart(decimals, '0').replace(/0+$/, '');
++  return `${whole}.${fracStr}`;
++}
++
++function parseDecimalToRaw(input: string, decimals: number): bigint | null {
++  if (!/^\d+(\.\d+)?$/.test(input.trim())) return null;
++  const [whole, frac = ''] = input.trim().split('.');
++  if (frac.length > decimals) return null;
++  const padded = (frac + '0'.repeat(decimals)).slice(0, decimals);
++  return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(padded || '0');
++}
++
++type FlowState =
++  | { status: 'idle' }
++  | { status: 'busy'; label: string }
++  | { status: 'done'; message: string }
++  | { status: 'error'; message: string };
++
++export default function ShieldPage() {
++  const navigate = useNavigate();
++  const [searchParams] = useSearchParams();
++  const ownerAddress = useSelector(getSelectedAddress) as string | undefined;
++  const networkClientId = useSelector(getSelectedNetworkClientId) as string;
++
++  const assetParam = searchParams.get('asset')?.toLowerCase() ?? '';
++  const chainIdParam = searchParams.get('chainId') ?? '';
++
++  const wrapper = useMemo(() => {
++    if (!assetParam || !chainIdParam) return undefined;
++    const chainIdNum = parseInt(chainIdParam.replace(/^0x/, ''), 16);
++    return findWrapperByUnderlying(assetParam, chainIdNum);
++  }, [assetParam, chainIdParam]);
++
++  const [amount, setAmount] = useState('');
++  const [flow, setFlow] = useState<FlowState>({ status: 'idle' });
++  const [balance, setBalance] = useState<bigint | null>(null);
++
++  // Fetch underlying balance for "X available" + Max button.
++  useEffect(() => {
++    if (!wrapper || !ownerAddress) return;
++    let cancelled = false;
++    fetchErc20Balance(wrapper.underlying, ownerAddress)
++      .then((v) => { if (!cancelled) setBalance(v); })
++      .catch(() => { if (!cancelled) setBalance(0n); });
++    return () => { cancelled = true; };
++  }, [wrapper, ownerAddress]);
++
++  const chainIdHex = wrapper
++    ? (`0x${wrapper.chainId.toString(16)}` as `0x${string}`)
++    : ('0x0' as `0x${string}`);
++
++  const dispatchTx = useCallback(
++    async (to: string, data: `0x${string}`, type: TransactionType) => {
++      if (!ownerAddress) throw new Error('No selected account');
++      const txMeta = await addTransaction(
++        {
++          from: ownerAddress as `0x${string}`,
++          to: to as `0x${string}`,
++          data,
++          value: '0x0',
++          chainId: chainIdHex,
++        } as Parameters<typeof addTransaction>[0],
++        { networkClientId, type },
++      );
++      return txMeta.hash as string;
++    },
++    [ownerAddress, chainIdHex, networkClientId],
++  );
++
++  const onMax = useCallback(() => {
++    if (!wrapper || balance === null) return;
++    setAmount(formatAmount(balance, wrapper.decimals));
++  }, [balance, wrapper]);
++
++  const onContinue = useCallback(async () => {
++    if (!wrapper || !ownerAddress) return;
++    const raw = parseDecimalToRaw(amount, wrapper.decimals);
++    if (raw === null || raw === 0n) {
++      setFlow({ status: 'error', message: 'Invalid amount' });
++      return;
++    }
++    if (balance !== null && raw > balance) {
++      setFlow({ status: 'error', message: 'Amount exceeds your balance' });
++      return;
++    }
++    try {
++      // Step 1 — approve underlying ERC-20 to the wrapper
++      setFlow({ status: 'busy', label: '1/2 Approving — sign in MetaMask…' });
++      const approveData = encodeApprove(wrapper.address, raw);
++      const approveHash = await dispatchTx(
++        wrapper.underlying,
++        approveData,
++        TransactionType.tokenMethodApprove,
++      );
++      setFlow({ status: 'busy', label: '1/2 Waiting for approval to mine…' });
++      await waitReceipt(approveHash);
++
++      // Step 2 — wrap
++      setFlow({ status: 'busy', label: '2/2 Wrapping — sign in MetaMask…' });
++      const wrapData = encodeWrap(ownerAddress, raw);
++      const wrapHash = await dispatchTx(
++        wrapper.address,
++        wrapData,
++        TransactionType.contractInteraction,
++      );
++      setFlow({ status: 'busy', label: '2/2 Waiting for wrap to mine…' });
++      await waitReceipt(wrapHash);
++
++      setFlow({
++        status: 'done',
++        message: `Shielded ${amount} ${wrapper.underlyingSymbol} → ${wrapper.symbol}`,
++      });
++
++      // Switch the home tab to cTokens so the user lands on their newly-
++      // shielded balance.
++      await setDefaultHomeActiveTabName(AccountOverviewTabKey.PrivateBalance);
++      // Brief delay so the success message is visible.
++      setTimeout(() => navigate('/'), 1_500);
++    } catch (err) {
++      setFlow({ status: 'error', message: (err as Error).message });
++    }
++  }, [amount, balance, wrapper, ownerAddress, dispatchTx, navigate]);
++
++  if (!wrapper) {
++    return (
++      <Box padding={4}>
++        <Text variant={TextVariant.bodyMd} color={TextColor.errorDefault}>
++          No confidential wrapper is registered for this token.
++        </Text>
++      </Box>
++    );
++  }
++
++  const busy = flow.status === 'busy';
++  const done = flow.status === 'done';
++  const letter =
++    wrapper.underlyingSymbol.charAt(0).toUpperCase() || '?';
++
++  return (
++    <Box
++      backgroundColor={BackgroundColor.backgroundDefault}
++      display={Display.Flex}
++      flexDirection={FlexDirection.Column}
++      height={BlockSize.Full}
++      width={BlockSize.Full}
++      style={{ minHeight: '100vh' }}
++    >
++      {/* Header */}
++      <Box
++        display={Display.Flex}
++        alignItems={AlignItems.center}
++        justifyContent={JustifyContent.spaceBetween}
++        padding={4}
++      >
++        <button
++          type="button"
++          onClick={() => navigate(-1)}
++          aria-label="Back"
++          style={{
++            background: 'transparent',
++            border: 'none',
++            padding: 4,
++            cursor: 'pointer',
++            color: 'var(--color-icon-default)',
++            display: 'flex',
++            alignItems: 'center',
++          }}
++        >
++          <Icon name={IconName.ArrowLeft} size={IconSize.Md} color={IconColor.iconDefault} />
++        </button>
++        <Text variant={TextVariant.headingSm}>Shield</Text>
++        {/* Spacer to balance the back button on the left so the title stays centered */}
++        <Box style={{ width: 28 }} />
++      </Box>
++
++      {/* Token icon + symbol */}
++      <Box
++        display={Display.Flex}
++        flexDirection={FlexDirection.Column}
++        alignItems={AlignItems.center}
++        gap={2}
++        marginTop={4}
++        marginBottom={6}
++      >
++        <Box
++          display={Display.Flex}
++          alignItems={AlignItems.center}
++          justifyContent={JustifyContent.center}
++          borderRadius={BorderRadius.full}
++          style={{
++            width: 56,
++            height: 56,
++            background: '#2775CA',
++            color: 'white',
++            fontSize: 22,
++            fontWeight: 600,
++          }}
++        >
++          {letter}
++        </Box>
++        <Text variant={TextVariant.headingMd}>{wrapper.underlyingSymbol}</Text>
++        <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
++          → {wrapper.symbol} · {wrapper.network}
++        </Text>
++      </Box>
++
++      {/* Amount input */}
++      <Box paddingLeft={4} paddingRight={4} display={Display.Flex} flexDirection={FlexDirection.Column} gap={2}>
++        <Text variant={TextVariant.bodyMdMedium}>Amount</Text>
++        <Box
++          display={Display.Flex}
++          alignItems={AlignItems.center}
++          borderColor={BorderColor.borderMuted}
++          borderRadius={BorderRadius.LG}
++          paddingLeft={3}
++          paddingRight={3}
++          style={{ height: 48 }}
++        >
++          <input
++            type="text"
++            inputMode="decimal"
++            placeholder="0"
++            value={amount}
++            onChange={(e) => setAmount(e.target.value)}
++            disabled={busy || done}
++            style={{
++              flex: 1,
++              background: 'transparent',
++              border: 'none',
++              outline: 'none',
++              color: 'inherit',
++              fontSize: 18,
++              fontWeight: 500,
++            }}
++          />
++          <Text as="span" variant={TextVariant.bodyMdMedium} color={TextColor.textAlternative}>
++            {wrapper.underlyingSymbol}
++          </Text>
++        </Box>
++
++        <Box
++          display={Display.Flex}
++          justifyContent={JustifyContent.spaceBetween}
++          alignItems={AlignItems.center}
++        >
++          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
++            {balance === null
++              ? 'Loading balance…'
++              : `${formatAmount(balance, wrapper.decimals)} ${wrapper.underlyingSymbol} available`}
++          </Text>
++          <button
++            type="button"
++            onClick={onMax}
++            disabled={balance === null || busy || done}
++            style={{
++              background: 'transparent',
++              border: 'none',
++              color: 'var(--color-primary-default)',
++              cursor: balance === null ? 'default' : 'pointer',
++              fontSize: 12,
++              fontWeight: 600,
++              padding: '4px 8px',
++            }}
++          >
++            Max
++          </button>
++        </Box>
++      </Box>
++
++      {/* Status / Errors */}
++      {flow.status === 'busy' && (
++        <Box marginTop={4} paddingLeft={4} paddingRight={4}>
++          <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++            {flow.label}
++          </Text>
++        </Box>
++      )}
++      {flow.status === 'error' && (
++        <Box marginTop={4} paddingLeft={4} paddingRight={4}>
++          <Text variant={TextVariant.bodySm} color={TextColor.errorDefault}>
++            {flow.message}
++          </Text>
++        </Box>
++      )}
++      {flow.status === 'done' && (
++        <Box marginTop={4} paddingLeft={4} paddingRight={4}>
++          <Text variant={TextVariant.bodySm} color={TextColor.successDefault}>
++            {flow.message}
++          </Text>
++        </Box>
++      )}
++
++      {/* Continue button — pinned at the bottom */}
++      <Box style={{ flex: 1 }} />
++      <Box padding={4}>
++        <Button
++          variant={ButtonVariant.Primary}
++          size={ButtonSize.Lg}
++          block
++          disabled={busy || done || balance === null || !amount}
++          onClick={onContinue}
++        >
++          {busy ? 'Working…' : done ? 'Done' : 'Continue'}
++        </Button>
++      </Box>
++    </Box>
++  );
++}
