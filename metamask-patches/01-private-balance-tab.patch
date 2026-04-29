@@ -788,10 +788,10 @@ index 0000000..4dd1304
 +export { default } from './shield';
 diff --git a/ui/pages/shield/shield.tsx b/ui/pages/shield/shield.tsx
 new file mode 100644
-index 0000000..386fa76
+index 0000000..706ab10
 --- /dev/null
 +++ b/ui/pages/shield/shield.tsx
-@@ -0,0 +1,405 @@
+@@ -0,0 +1,399 @@
 +// Full-screen Shield page: lets the user wrap a public ERC-20 (e.g. USDC)
 +// into its confidential ERC-7984 wrapper (e.g. cUSDC). Reached from the
 +// Shield IconButton on the asset detail page.
@@ -864,19 +864,6 @@ index 0000000..386fa76
 +  return BigInt(hex);
 +}
 +
-+async function waitReceipt(txHash: string, { timeoutMs = 60_000 } = {}) {
-+  const t0 = Date.now();
-+  while (Date.now() - t0 < timeoutMs) {
-+    const result = await rpcCall<null | { status: string }>(
-+      'eth_getTransactionReceipt',
-+      [txHash],
-+    );
-+    if (result) return result;
-+    await new Promise((r) => setTimeout(r, 2_000));
-+  }
-+  throw new Error(`Receipt timeout for ${txHash}`);
-+}
-+
 +function formatAmount(v: bigint, decimals: number): string {
 +  if (v === 0n) return '0';
 +  const unit = 10n ** BigInt(decimals);
@@ -934,36 +921,12 @@ index 0000000..386fa76
 +    ? (`0x${wrapper.chainId.toString(16)}` as `0x${string}`)
 +    : ('0x0' as `0x${string}`);
 +
-+  const dispatchTx = useCallback(
-+    async (to: string, data: `0x${string}`, type: TransactionType) => {
-+      if (!ownerAddress) throw new Error('No selected account');
-+      // addTransactionAndWaitForPublish (vs plain addTransaction) waits until
-+      // the tx is actually broadcast — guaranteeing txMeta.hash is set when
-+      // the promise resolves. Without this, we'd race against a pending hash
-+      // and call eth_getTransactionReceipt(undefined), which the Arbitrum RPC
-+      // rejects with: "invalid argument 0: json: cannot unmarshal non-string
-+      // into Go value of type hexutil.Bytes".
-+      const txMeta = await addTransactionAndWaitForPublish(
-+        {
-+          from: ownerAddress as `0x${string}`,
-+          to: to as `0x${string}`,
-+          data,
-+          value: '0x0',
-+          chainId: chainIdHex,
-+        } as Parameters<typeof addTransactionAndWaitForPublish>[0],
-+        { networkClientId, type },
-+      );
-+      return txMeta.hash as string;
-+    },
-+    [ownerAddress, chainIdHex, networkClientId],
-+  );
-+
 +  const onMax = useCallback(() => {
 +    if (!wrapper || balance === null) return;
 +    setAmount(formatAmount(balance, wrapper.decimals));
 +  }, [balance, wrapper]);
 +
-+  const onContinue = useCallback(async () => {
++  const onContinue = useCallback(() => {
 +    if (!wrapper || !ownerAddress) return;
 +    const raw = parseDecimalToRaw(amount, wrapper.decimals);
 +    if (raw === null || raw === 0n) {
@@ -974,43 +937,74 @@ index 0000000..386fa76
 +      setFlow({ status: 'error', message: 'Amount exceeds your balance' });
 +      return;
 +    }
-+    try {
-+      // Step 1 — approve underlying ERC-20 to the wrapper
-+      setFlow({ status: 'busy', label: '1/2 Approving — sign in MetaMask…' });
-+      const approveData = encodeApprove(wrapper.address, raw);
-+      const approveHash = await dispatchTx(
-+        wrapper.underlying,
-+        approveData,
-+        TransactionType.tokenMethodApprove,
-+      );
-+      setFlow({ status: 'busy', label: '1/2 Waiting for approval to mine…' });
-+      await waitReceipt(approveHash);
 +
-+      // Step 2 — wrap
-+      setFlow({ status: 'busy', label: '2/2 Wrapping — sign in MetaMask…' });
-+      const wrapData = encodeWrap(ownerAddress, raw);
-+      const wrapHash = await dispatchTx(
-+        wrapper.address,
-+        wrapData,
-+        TransactionType.contractInteraction,
-+      );
-+      setFlow({ status: 'busy', label: '2/2 Waiting for wrap to mine…' });
-+      await waitReceipt(wrapHash);
++    // CRITICAL lifecycle detail: when the user confirms the first popup,
++    // MetaMask navigates the wallet UI back to '/'. That unmounts this
++    // /shield page, which would kill any await between step 1 and step 2,
++    // so step 2 (the wrap) would never be sent.
++    //
++    // Fix: fire BOTH addTransactionAndWaitForPublish calls synchronously,
++    // in the same JS tick. Both submitRequestToBackground messages reach
++    // the TransactionController before any popup appears, so both popups
++    // are queued. Even if our component unmounts mid-sign, popup 2 (wrap)
++    // is already in MetaMask's confirmation queue and will appear after
++    // the user confirms popup 1 (approve). Nonce assignment and on-chain
++    // execution order are preserved because the two addTransaction calls
++    // are dispatched in submission order.
 +
-+      setFlow({
-+        status: 'done',
-+        message: `Shielded ${amount} ${wrapper.underlyingSymbol} → ${wrapper.symbol}`,
++    // Pre-select the cTokens tab so the user lands there after confirming
++    // (since MetaMask sends them home).
++    void setDefaultHomeActiveTabName(AccountOverviewTabKey.PrivateBalance);
++
++    setFlow({
++      status: 'busy',
++      label: 'Sign 2 transactions in MetaMask (approve, then wrap)…',
++    });
++
++    const approveData = encodeApprove(wrapper.address, raw);
++    const wrapData = encodeWrap(ownerAddress, raw);
++
++    const approveP = addTransactionAndWaitForPublish(
++      {
++        from: ownerAddress as `0x${string}`,
++        to: wrapper.underlying as `0x${string}`,
++        data: approveData,
++        value: '0x0',
++        chainId: chainIdHex,
++      } as Parameters<typeof addTransactionAndWaitForPublish>[0],
++      { networkClientId, type: TransactionType.tokenMethodApprove },
++    );
++    const wrapP = addTransactionAndWaitForPublish(
++      {
++        from: ownerAddress as `0x${string}`,
++        to: wrapper.address as `0x${string}`,
++        data: wrapData,
++        value: '0x0',
++        chainId: chainIdHex,
++      } as Parameters<typeof addTransactionAndWaitForPublish>[0],
++      { networkClientId, type: TransactionType.contractInteraction },
++    );
++
++    Promise.all([approveP, wrapP])
++      .then(() => {
++        setFlow({
++          status: 'done',
++          message: `Shielded ${amount} ${wrapper.underlyingSymbol} → ${wrapper.symbol}`,
++        });
++        setTimeout(() => navigate('/'), 1_500);
++      })
++      .catch((err) => {
++        setFlow({ status: 'error', message: (err as Error).message });
 +      });
-+
-+      // Switch the home tab to cTokens so the user lands on their newly-
-+      // shielded balance.
-+      await setDefaultHomeActiveTabName(AccountOverviewTabKey.PrivateBalance);
-+      // Brief delay so the success message is visible.
-+      setTimeout(() => navigate('/'), 1_500);
-+    } catch (err) {
-+      setFlow({ status: 'error', message: (err as Error).message });
-+    }
-+  }, [amount, balance, wrapper, ownerAddress, dispatchTx, navigate]);
++  }, [
++    amount,
++    balance,
++    wrapper,
++    ownerAddress,
++    chainIdHex,
++    networkClientId,
++    navigate,
++  ]);
 +
 +  if (!wrapper) {
 +    return (
