@@ -104,16 +104,18 @@ index 0000000..1c3bd1f
 +  ts: number;
 +};
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-index 389e4ab..8f230ad 100644
+index 389e4ab..9e3d505 100644
 --- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -1,4 +1,4 @@
+@@ -1,5 +1,5 @@
 -import React, { useCallback, useEffect, useState } from 'react';
+-import { useSelector } from 'react-redux';
 +import React, { useCallback, useEffect, useRef, useState } from 'react';
- import { useSelector } from 'react-redux';
++import { useDispatch, useSelector } from 'react-redux';
  import {
    Box,
-@@ -17,14 +17,14 @@ import {
+   Button,
+@@ -17,14 +17,17 @@ import {
    BorderRadius,
    Display,
    FlexDirection,
@@ -124,13 +126,17 @@ index 389e4ab..8f230ad 100644
    TextVariant,
  } from '../../../../helpers/constants/design-system';
  import { getSelectedAddress } from '../../../../selectors';
- import { getSelectedNetworkClientId } from '../../../../../shared/lib/selectors/networks';
+-import { getSelectedNetworkClientId } from '../../../../../shared/lib/selectors/networks';
 -import { addTransaction } from '../../../../store/actions';
-+import { addTransactionAndWaitForPublish } from '../../../../store/actions';
++import {
++  getNetworkConfigurationsByChainId,
++  getSelectedNetworkClientId,
++} from '../../../../../shared/lib/selectors/networks';
++import { addNetwork, addTransactionAndWaitForPublish } from '../../../../store/actions';
  import { TransactionType } from '@metamask/transaction-controller';
  import {
    encodeAddViewer,
-@@ -35,12 +35,19 @@ import {
+@@ -35,12 +38,19 @@ import {
    encodeWrap,
    encryptUint256,
    fetchBalanceHandle,
@@ -152,7 +158,7 @@ index 389e4ab..8f230ad 100644
  
  const NOX_COMPUTE: `0x${string}` = '0xd464B198f06756a1d00be223634b85E0a731c229';
  const ARB_SEPOLIA_RPC = 'https://sepolia-rollup.arbitrum.io/rpc';
-@@ -123,32 +130,41 @@ async function saveCachedValue(key: string, value: bigint): Promise<void> {
+@@ -123,32 +133,41 @@ async function saveCachedValue(key: string, value: bigint): Promise<void> {
    } catch { /* noop */ }
  }
  
@@ -220,7 +226,7 @@ index 389e4ab..8f230ad 100644
  
  type LoadState =
    | { status: 'idle' }
-@@ -197,23 +213,7 @@ type FlowStatus =
+@@ -197,23 +216,7 @@ type FlowStatus =
  // USDC brand blue — displayed when the underlying is Circle's USDC
  const USDC_BLUE = '#2775CA';
  
@@ -245,7 +251,7 @@ index 389e4ab..8f230ad 100644
    const letter = symbol.replace(/^c/i, '').charAt(0).toUpperCase() || '?';
    return (
      <div
-@@ -235,94 +235,6 @@ function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
+@@ -235,94 +238,6 @@ function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
    );
  }
  
@@ -340,7 +346,7 @@ index 389e4ab..8f230ad 100644
  const inputStyle: React.CSSProperties = {
    width: '100%', padding: '7px 9px', fontSize: 12,
    background: 'transparent', color: 'inherit',
-@@ -425,6 +337,8 @@ function CTokenCard({
+@@ -425,6 +340,8 @@ function CTokenCard({
    networkClientId,
    load,
    reveal,
@@ -349,7 +355,7 @@ index 389e4ab..8f230ad 100644
    onReveal,
    onHide,
    onBalanceChanged,
-@@ -434,6 +348,8 @@ function CTokenCard({
+@@ -434,6 +351,8 @@ function CTokenCard({
    networkClientId: string;
    load: LoadState;
    reveal: RevealState;
@@ -358,7 +364,7 @@ index 389e4ab..8f230ad 100644
    onReveal: () => void;
    onHide: () => void;
    onBalanceChanged: () => void;
-@@ -460,16 +376,29 @@ function CTokenCard({
+@@ -460,16 +379,29 @@ function CTokenCard({
      setFlow({ status: 'idle' });
    }, []);
  
@@ -390,7 +396,7 @@ index 389e4ab..8f230ad 100644
          { networkClientId, type },
        );
        return txMeta.hash as string;
-@@ -607,7 +536,10 @@ function CTokenCard({
+@@ -607,7 +539,10 @@ function CTokenCard({
    } else if (load.status === 'ok') {
      revealed = (
        <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textDefault}>
@@ -402,7 +408,7 @@ index 389e4ab..8f230ad 100644
        </Text>
      );
    } else {
-@@ -619,7 +551,13 @@ function CTokenCard({
+@@ -619,7 +554,13 @@ function CTokenCard({
        as="span"
        variant={TextVariant.bodyXs}
        color={TextColor.textMuted}
@@ -417,7 +423,7 @@ index 389e4ab..8f230ad 100644
      >
        handle {shortHandle(load.handle)}
      </Text>
-@@ -640,8 +578,14 @@ function CTokenCard({
+@@ -640,8 +581,14 @@ function CTokenCard({
        gap={2}
      >
        <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
@@ -434,7 +440,7 @@ index 389e4ab..8f230ad 100644
            <Text variant={TextVariant.bodyMdMedium}>
              {token.symbol} · {token.network}
            </Text>
-@@ -653,11 +597,35 @@ function CTokenCard({
+@@ -653,11 +600,35 @@ function CTokenCard({
          On-chain balance is encrypted.
        </Text>
  
@@ -474,7 +480,7 @@ index 389e4ab..8f230ad 100644
          <Button
            variant={ButtonVariant.Secondary}
            size={ButtonSize.Sm}
-@@ -694,14 +662,6 @@ function CTokenCard({
+@@ -694,14 +665,6 @@ function CTokenCard({
          >
            Share
          </Button>
@@ -489,7 +495,26 @@ index 389e4ab..8f230ad 100644
        </Box>
  
        {action !== null && (
-@@ -734,26 +694,167 @@ export default function PrivateBalanceTab() {
+@@ -729,31 +692,232 @@ function CTokenCard({
+ }
+ 
+ export default function PrivateBalanceTab() {
++  const dispatch = useDispatch();
+   const ownerAddress = useSelector(getSelectedAddress) as string | undefined;
+-  const networkClientId = useSelector(getSelectedNetworkClientId) as string;
++  const selectedNetworkClientId = useSelector(getSelectedNetworkClientId) as string;
++  const networkConfigsByChainId = useSelector(getNetworkConfigurationsByChainId) as
++    | Record<string, {
++        chainId: string;
++        rpcEndpoints: { url: string; networkClientId: string; type: string; name?: string }[];
++        defaultRpcEndpointIndex: number;
++      }>
++    | undefined;
++  // Use the user's currently-selected chain for legacy callers that don't
++  // know what chain they need; the Shield consumer overrides this with the
++  // wrapper's chain-specific networkClientId so it doesn't get routed to
++  // a broken Infura key on the wrong chain.
++  const networkClientId = selectedNetworkClientId;
    const [loads, setLoads] = useState<Record<string, LoadState>>({});
    const [reveals, setReveals] = useState<Record<string, RevealState>>({});
    const [refetchTick, setRefetchTick] = useState(0);
@@ -560,7 +585,7 @@ index 389e4ab..8f230ad 100644
 +  // Uses addTransactionAndWaitForPublish so the hash is set before we
 +  // await its receipt. Sequential — this tab is on home, doesn't unmount.
 +  useEffect(() => {
-+    if (!ownerAddress || !networkClientId) return;
++    if (!ownerAddress) return;
 +    const storage = getSessionStorage();
 +    if (!storage) {
 +      console.warn('[nox] cTokens: chrome.storage.session not available, cannot resume Shield');
@@ -594,6 +619,51 @@ index 389e4ab..8f230ad 100644
 +        const formatted = formatAmount(rawAmount, match.decimals);
 +        const chainIdHex = `0x${match.chainId.toString(16)}` as `0x${string}`;
 +
++        // Resolve a networkClientId that REALLY routes to chainIdHex.
++        // Using the user's currently-selected networkClientId is wrong when
++        // they're on a different chain (e.g. Mainnet) — MetaMask routes the
++        // tx through that network's RPC (e.g. mainnet Infura with the
++        // placeholder INFURA_PROJECT_ID=0000... in metamaskrc) and the
++        // request comes back as 401 Unauthorized.
++        const existingConfig = networkConfigsByChainId?.[chainIdHex];
++        let chainNetworkClientId: string;
++        if (existingConfig?.rpcEndpoints?.length) {
++          const idx = existingConfig.defaultRpcEndpointIndex ?? 0;
++          chainNetworkClientId = existingConfig.rpcEndpoints[idx]?.networkClientId
++            ?? existingConfig.rpcEndpoints[0]!.networkClientId;
++          console.log('[nox] using existing network', { chainIdHex, networkClientId: chainNetworkClientId, rpcUrl: existingConfig.rpcEndpoints[idx]?.url });
++        } else {
++          // No config for this chain → register one with the public RPC.
++          console.log('[nox] no network config for', chainIdHex, '— adding Arbitrum Sepolia public RPC');
++          const added = await dispatch(
++            // eslint-disable-next-line @typescript-eslint/no-explicit-any
++            addNetwork({
++              chainId: chainIdHex,
++              name: 'Arbitrum Sepolia',
++              nativeCurrency: 'ETH',
++              defaultRpcEndpointIndex: 0,
++              defaultBlockExplorerUrlIndex: 0,
++              blockExplorerUrls: ['https://sepolia.arbiscan.io'],
++              rpcEndpoints: [
++                {
++                  url: 'https://sepolia-rollup.arbitrum.io/rpc',
++                  type: 'custom',
++                  name: 'Arbitrum Sepolia (public)',
++                },
++              ],
++            } as any),
++          ) as unknown as {
++            rpcEndpoints?: { url: string; networkClientId: string }[];
++            defaultRpcEndpointIndex?: number;
++          } | undefined;
++          if (!added?.rpcEndpoints?.length) {
++            throw new Error('Failed to add Arbitrum Sepolia network');
++          }
++          chainNetworkClientId =
++            added.rpcEndpoints[added.defaultRpcEndpointIndex ?? 0]!.networkClientId;
++          console.log('[nox] added network, networkClientId:', chainNetworkClientId);
++        }
++
 +        setShieldExec({
 +          status: 'busy',
 +          label: `1/2 Approving ${formatted} ${match.underlyingSymbol} — sign in MetaMask…`,
@@ -604,6 +674,7 @@ index 389e4ab..8f230ad 100644
 +
 +        // Step 1: approve
 +        const approveData = encodeApprove(match.address, rawAmount);
++        console.log('[nox] dispatching approve', { to: match.underlying, networkClientId: chainNetworkClientId });
 +        const approveMeta = await addTransactionAndWaitForPublish(
 +          {
 +            from: ownerAddress as `0x${string}`,
@@ -612,7 +683,7 @@ index 389e4ab..8f230ad 100644
 +            value: '0x0',
 +            chainId: chainIdHex,
 +          } as Parameters<typeof addTransactionAndWaitForPublish>[0],
-+          { networkClientId, type: TransactionType.tokenMethodApprove },
++          { networkClientId: chainNetworkClientId, type: TransactionType.tokenMethodApprove },
 +        );
 +        if (cancelled) return;
 +        setShieldExec({
@@ -634,6 +705,7 @@ index 389e4ab..8f230ad 100644
 +          symbol: match.symbol,
 +        });
 +        const wrapData = encodeWrap(ownerAddress, rawAmount);
++        console.log('[nox] dispatching wrap', { to: match.address, networkClientId: chainNetworkClientId });
 +        const wrapMeta = await addTransactionAndWaitForPublish(
 +          {
 +            from: ownerAddress as `0x${string}`,
@@ -642,7 +714,7 @@ index 389e4ab..8f230ad 100644
 +            value: '0x0',
 +            chainId: chainIdHex,
 +          } as Parameters<typeof addTransactionAndWaitForPublish>[0],
-+          { networkClientId, type: TransactionType.contractInteraction },
++          { networkClientId: chainNetworkClientId, type: TransactionType.contractInteraction },
 +        );
 +        if (cancelled) return;
 +        setShieldExec({
@@ -668,7 +740,7 @@ index 389e4ab..8f230ad 100644
 +      }
 +    })();
 +    return () => { cancelled = true; };
-+  }, [ownerAddress, networkClientId]);
++  }, [ownerAddress, networkConfigsByChainId, dispatch]);
 +
 +  // Stable ref so the storage-change listener can read latest handles
 +  // without re-subscribing on every loads update.
@@ -677,7 +749,7 @@ index 389e4ab..8f230ad 100644
  
    useEffect(() => {
      if (!ownerAddress) return;
-@@ -778,12 +879,21 @@ export default function PrivateBalanceTab() {
+@@ -778,12 +942,21 @@ export default function PrivateBalanceTab() {
              // handle already (survives side-panel remount after signing).
              const key = cacheKey(ownerAddress, handle);
              const cached = await loadCachedValue(key);
@@ -700,7 +772,7 @@ index 389e4ab..8f230ad 100644
              } else {
                // Surface any persisted error from a previous failed decrypt
                const storage = getSessionStorage();
-@@ -814,6 +924,42 @@ export default function PrivateBalanceTab() {
+@@ -814,6 +987,42 @@ export default function PrivateBalanceTab() {
      return () => { cancelled = true; };
    }, [ownerAddress, refetchTick]);
  
@@ -743,7 +815,7 @@ index 389e4ab..8f230ad 100644
    const revealToken = useCallback(
      async (tokenAddress: string) => {
        if (!ownerAddress) return;
-@@ -830,16 +976,16 @@ export default function PrivateBalanceTab() {
+@@ -830,16 +1039,16 @@ export default function PrivateBalanceTab() {
        }
  
        setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'signing' } }));
@@ -765,7 +837,7 @@ index 389e4ab..8f230ad 100644
              return v;
            }).finally(() => {
              inflightDecrypts.delete(key);
-@@ -849,9 +995,7 @@ export default function PrivateBalanceTab() {
+@@ -849,9 +1058,7 @@ export default function PrivateBalanceTab() {
          const value = await pending;
          setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value } }));
        } catch (err) {
@@ -776,7 +848,7 @@ index 389e4ab..8f230ad 100644
          const storage = getSessionStorage();
          if (storage) {
            try { await storage.set({ [`${key}:error`]: (err as Error).message }); } catch { /* noop */ }
-@@ -882,7 +1026,39 @@ export default function PrivateBalanceTab() {
+@@ -882,7 +1089,39 @@ export default function PrivateBalanceTab() {
    }, [loads, revealToken]);
  
    return (
@@ -817,7 +889,7 @@ index 389e4ab..8f230ad 100644
        <Box
          display={Display.Flex}
          justifyContent={JustifyContent.spaceBetween}
-@@ -932,6 +1108,10 @@ export default function PrivateBalanceTab() {
+@@ -932,6 +1171,10 @@ export default function PrivateBalanceTab() {
          });
          const held = NOX_CTOKENS.filter((t) => {
            const l = loads[t.address];
@@ -828,7 +900,7 @@ index 389e4ab..8f230ad 100644
            return l?.status === 'ok' && !l.zero;
          });
  
-@@ -983,6 +1163,10 @@ export default function PrivateBalanceTab() {
+@@ -983,6 +1226,10 @@ export default function PrivateBalanceTab() {
              networkClientId={networkClientId}
              load={loads[token.address] ?? { status: 'idle' }}
              reveal={reveals[token.address] ?? { status: 'hidden' }}
@@ -839,7 +911,7 @@ index 389e4ab..8f230ad 100644
              onReveal={() => void revealToken(token.address)}
              onHide={() => hideToken(token.address)}
              onBalanceChanged={() => setRefetchTick((n) => n + 1)}
-@@ -990,8 +1174,6 @@ export default function PrivateBalanceTab() {
+@@ -990,8 +1237,6 @@ export default function PrivateBalanceTab() {
          ));
        })()}
  
