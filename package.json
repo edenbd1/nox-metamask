@@ -12,5 +12,9 @@
     "site:dev": "pnpm --filter @nox-metamask/site dev",
     "dev": "pnpm -r --parallel --filter=!@nox-metamask/contracts run dev",
     "contracts:deploy": "pnpm --filter @nox-metamask/contracts deploy:arbSepolia"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "playwright": "^1.59.1"
   }
 }
