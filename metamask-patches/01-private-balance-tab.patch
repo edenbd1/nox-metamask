@@ -104,7 +104,7 @@ index 0000000..1c3bd1f
 +  ts: number;
 +};
 diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-index 389e4ab..e6487bd 100644
+index 389e4ab..8f230ad 100644
 --- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 +++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
 @@ -1,4 +1,4 @@
@@ -489,7 +489,7 @@ index 389e4ab..e6487bd 100644
        </Box>
  
        {action !== null && (
-@@ -734,26 +694,160 @@ export default function PrivateBalanceTab() {
+@@ -734,26 +694,167 @@ export default function PrivateBalanceTab() {
    const [loads, setLoads] = useState<Record<string, LoadState>>({});
    const [reveals, setReveals] = useState<Record<string, RevealState>>({});
    const [refetchTick, setRefetchTick] = useState(0);
@@ -562,14 +562,21 @@ index 389e4ab..e6487bd 100644
 +  useEffect(() => {
 +    if (!ownerAddress || !networkClientId) return;
 +    const storage = getSessionStorage();
-+    if (!storage) return;
++    if (!storage) {
++      console.warn('[nox] cTokens: chrome.storage.session not available, cannot resume Shield');
++      return;
++    }
 +    let cancelled = false;
 +    (async () => {
 +      try {
 +        const out = await storage.get(PENDING_SHIELD_KEY);
 +        const raw = out[PENDING_SHIELD_KEY] as PendingShieldIntent | undefined;
++        console.log('[nox] cTokens consumer poll', { hasIntent: !!raw, intent: raw });
 +        if (!raw || cancelled) return;
-+        if (Date.now() - raw.ts > PENDING_SHIELD_TTL_MS) return;
++        if (Date.now() - raw.ts > PENDING_SHIELD_TTL_MS) {
++          console.log('[nox] cTokens: pendingShield expired, skipping');
++          return;
++        }
 +        const match = NOX_CTOKENS.find(
 +          (t) =>
 +            t.underlying.toLowerCase() === raw.underlying.toLowerCase() &&
@@ -670,7 +677,7 @@ index 389e4ab..e6487bd 100644
  
    useEffect(() => {
      if (!ownerAddress) return;
-@@ -778,12 +872,21 @@ export default function PrivateBalanceTab() {
+@@ -778,12 +879,21 @@ export default function PrivateBalanceTab() {
              // handle already (survives side-panel remount after signing).
              const key = cacheKey(ownerAddress, handle);
              const cached = await loadCachedValue(key);
@@ -693,7 +700,7 @@ index 389e4ab..e6487bd 100644
              } else {
                // Surface any persisted error from a previous failed decrypt
                const storage = getSessionStorage();
-@@ -814,6 +917,42 @@ export default function PrivateBalanceTab() {
+@@ -814,6 +924,42 @@ export default function PrivateBalanceTab() {
      return () => { cancelled = true; };
    }, [ownerAddress, refetchTick]);
  
@@ -736,7 +743,7 @@ index 389e4ab..e6487bd 100644
    const revealToken = useCallback(
      async (tokenAddress: string) => {
        if (!ownerAddress) return;
-@@ -830,16 +969,16 @@ export default function PrivateBalanceTab() {
+@@ -830,16 +976,16 @@ export default function PrivateBalanceTab() {
        }
  
        setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'signing' } }));
@@ -758,7 +765,7 @@ index 389e4ab..e6487bd 100644
              return v;
            }).finally(() => {
              inflightDecrypts.delete(key);
-@@ -849,9 +988,7 @@ export default function PrivateBalanceTab() {
+@@ -849,9 +995,7 @@ export default function PrivateBalanceTab() {
          const value = await pending;
          setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value } }));
        } catch (err) {
@@ -769,7 +776,7 @@ index 389e4ab..e6487bd 100644
          const storage = getSessionStorage();
          if (storage) {
            try { await storage.set({ [`${key}:error`]: (err as Error).message }); } catch { /* noop */ }
-@@ -882,7 +1019,39 @@ export default function PrivateBalanceTab() {
+@@ -882,7 +1026,39 @@ export default function PrivateBalanceTab() {
    }, [loads, revealToken]);
  
    return (
@@ -810,7 +817,7 @@ index 389e4ab..e6487bd 100644
        <Box
          display={Display.Flex}
          justifyContent={JustifyContent.spaceBetween}
-@@ -932,6 +1101,10 @@ export default function PrivateBalanceTab() {
+@@ -932,6 +1108,10 @@ export default function PrivateBalanceTab() {
          });
          const held = NOX_CTOKENS.filter((t) => {
            const l = loads[t.address];
@@ -821,7 +828,7 @@ index 389e4ab..e6487bd 100644
            return l?.status === 'ok' && !l.zero;
          });
  
-@@ -983,6 +1156,10 @@ export default function PrivateBalanceTab() {
+@@ -983,6 +1163,10 @@ export default function PrivateBalanceTab() {
              networkClientId={networkClientId}
              load={loads[token.address] ?? { status: 'idle' }}
              reveal={reveals[token.address] ?? { status: 'hidden' }}
@@ -832,7 +839,7 @@ index 389e4ab..e6487bd 100644
              onReveal={() => void revealToken(token.address)}
              onHide={() => hideToken(token.address)}
              onBalanceChanged={() => setRefetchTick((n) => n + 1)}
-@@ -990,8 +1167,6 @@ export default function PrivateBalanceTab() {
+@@ -990,8 +1174,6 @@ export default function PrivateBalanceTab() {
          ));
        })()}
  
@@ -958,10 +965,10 @@ index 0000000..4dd1304
 +export { default } from './shield';
 diff --git a/ui/pages/shield/shield.tsx b/ui/pages/shield/shield.tsx
 new file mode 100644
-index 0000000..92fbdeb
+index 0000000..19b2d6c
 --- /dev/null
 +++ b/ui/pages/shield/shield.tsx
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,376 @@
 +// Full-screen Shield page: lets the user wrap a public ERC-20 (e.g. USDC)
 +// into its confidential ERC-7984 wrapper (e.g. cUSDC). Reached from the
 +// Shield IconButton on the asset detail page.
@@ -1137,14 +1144,20 @@ index 0000000..92fbdeb
 +      const session = chromeRef?.storage?.session;
 +      if (session) {
 +        await session.set({ [PENDING_SHIELD_KEY]: intent });
++        console.log('[nox] /shield wrote pendingShield intent', intent);
++      } else {
++        console.warn('[nox] /shield: chrome.storage.session not available');
 +      }
-+    } catch {
-+      /* noop — falls back to no-intent, user lands on cTokens with no auto-action */
++    } catch (err) {
++      console.error('[nox] /shield: failed to write intent', err);
 +    }
 +
-+    // Pre-select the cTokens tab so the user lands there.
-+    await setDefaultHomeActiveTabName(AccountOverviewTabKey.PrivateBalance);
-+    navigate('/');
++    // Pre-select the cTokens tab so the user lands there. The Redux-backed
++    // setDefaultHomeActiveTabName is async and may not be visible to the
++    // home renderer in time, so we ALSO push ?tab=private-balance into the
++    // URL — useTabState reads the URL first.
++    void setDefaultHomeActiveTabName(AccountOverviewTabKey.PrivateBalance);
++    navigate(`/?tab=${AccountOverviewTabKey.PrivateBalance}`);
 +  }, [amount, balance, wrapper, ownerAddress, navigate]);
 +
 +  if (!wrapper) {
