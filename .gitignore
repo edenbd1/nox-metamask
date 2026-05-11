@@ -44,5 +44,9 @@ nox-docs/
 # MetaMask fork (separate upstream, not part of our tree)
 metamask-fork/
 
+# Playwright artifacts
+test-results/
+playwright-report/
+
 # Claude Code internals
 .claude/

@@ -1,35 +1,783 @@
-diff --git a/ui/components/app/assets/private-balance-tab/nox-tokens.ts b/ui/components/app/assets/private-balance-tab/nox-tokens.ts
-new file mode 100644
-index 0000000..1c3bd1f
---- /dev/null
-+++ b/ui/components/app/assets/private-balance-tab/nox-tokens.ts
-@@ -0,0 +1,99 @@
-+// Shared registry of known ERC-7984 confidential wrappers. Used by both the
-+// cTokens tab (to scan balances) and the asset detail page (to decide whether
-+// to show the Shield button on an ERC-20 like USDC or RLC).
-+//
-+// Today there's no public ERC-7984 registry, so this list is curated. Add
-+// entries as new wrappers ship.
+diff --git a/app/scripts/metamask-controller.js b/app/scripts/metamask-controller.js
+index bab8784..b1fd6f7 100644
+--- a/app/scripts/metamask-controller.js
++++ b/app/scripts/metamask-controller.js
+@@ -3840,6 +3840,31 @@ export default class MetamaskController extends EventEmitter {
+         }),
+       lookupSelectedNetworks: this.lookupSelectedNetworks.bind(this),
+       resetWallet: this.resetWallet.bind(this),
 +
-+export type NoxCToken = {
-+  address: string;
-+  symbol: string;
-+  name: string;
-+  network: string;
-+  chainId: number;
-+  underlying: string;
-+  underlyingSymbol: string;
-+  decimals: number;
++      // Nox — Confidential tokens (iExec). Exposes a UI-originated EIP-712
++      // typed-data signing so the Private Balance tab can run the gasless
++      // user-decrypt flow against the Nox Handle Gateway without deep-linking
++      // to an external dApp. This wraps SignatureController in the same way
++      // eth_signTypedData_v4 coming from a dApp would, but with origin
++      // 'metamask' so no permission dialog is skipped.
++      noxSignTypedDataV4: async (typedData, from) => {
++        const serialized =
++          typeof typedData === 'string'
++            ? typedData
++            : JSON.stringify(typedData);
++        return this.signatureController.newUnsignedTypedMessage(
++          { data: serialized, from },
++          {
++            id: Date.now(),
++            method: 'eth_signTypedData_v4',
++            params: [from, serialized],
++            origin: ORIGIN_METAMASK,
++            networkClientId:
++              this.networkController.state.selectedNetworkClientId,
++          },
++          'V4',
++        );
++      },
+     };
+   }
+ 
+diff --git a/shared/constants/app-state.ts b/shared/constants/app-state.ts
+index b56a68c..89e0bbf 100644
+--- a/shared/constants/app-state.ts
++++ b/shared/constants/app-state.ts
+@@ -5,6 +5,7 @@ import { MetaMetricsEventName } from './metametrics';
+ 
+ export enum AccountOverviewTabKey {
+   Tokens = 'tokens',
++  PrivateBalance = 'private-balance',
+   Nfts = 'nfts',
+   Activity = 'activity',
+   DeFi = 'defi',
+@@ -15,12 +16,15 @@ export type AccountOverviewTab = `${AccountOverviewTabKey}`;
+ 
+ export const ACCOUNT_OVERVIEW_TAB_KEY_TO_METAMETRICS_EVENT_NAME_MAP = {
+   [AccountOverviewTabKey.Tokens]: MetaMetricsEventName.TokenScreenOpened,
++  [AccountOverviewTabKey.PrivateBalance]: MetaMetricsEventName.TokenScreenOpened,
+   [AccountOverviewTabKey.DeFi]: MetaMetricsEventName.DeFiScreenOpened,
+   [AccountOverviewTabKey.Activity]: MetaMetricsEventName.ActivityScreenOpened,
+ } as const;
+ 
+ export const ACCOUNT_OVERVIEW_TAB_KEY_TO_TRACE_NAME_MAP = {
+   [AccountOverviewTabKey.Tokens]: TraceName.AccountOverviewAssetListTab,
++  // Reuse the Tokens trace name — PoC, no new metric needed
++  [AccountOverviewTabKey.PrivateBalance]: TraceName.AccountOverviewAssetListTab,
+   [AccountOverviewTabKey.Nfts]: TraceName.AccountOverviewNftsTab,
+   [AccountOverviewTabKey.Activity]: TraceName.AccountOverviewActivityTab,
+   [AccountOverviewTabKey.DeFi]: TraceName.AccountOverviewDeFiTab,
+diff --git a/ui/components/app/assets/private-balance-tab/index.ts b/ui/components/app/assets/private-balance-tab/index.ts
+new file mode 100644
+index 0000000..1ddc791
+--- /dev/null
++++ b/ui/components/app/assets/private-balance-tab/index.ts
+@@ -0,0 +1 @@
++export { default } from './private-balance-tab';
+diff --git a/ui/components/app/assets/private-balance-tab/nox-client.ts b/ui/components/app/assets/private-balance-tab/nox-client.ts
+new file mode 100644
+index 0000000..0cc68bd
+--- /dev/null
++++ b/ui/components/app/assets/private-balance-tab/nox-client.ts
+@@ -0,0 +1,211 @@
++// Self-contained Nox Handle Gateway client for the MetaMask Private Balance
++// tab. Re-implements @iexec-nox/handle's `decrypt()` flow using Web Crypto API
++// so nothing needs to be bundled into the extension sandbox.
++//
++// Chain config is hardcoded for Arbitrum Sepolia (chainId 421614).
++
++import { noxSignTypedDataV4 } from '../../../../store/actions';
++
++const HANDLE_GATEWAY =
++  'https://2e1800fc0dddeeadc189283ed1dce13c1ae28d48-3000.apps.ovh-tdx-dev.noxprotocol.dev';
++const NOX_COMPUTE = '0xd464B198f06756a1d00be223634b85E0a731c229';
++const CHAIN_ID = 421614;
++
++const DERIVATION_INFO = new Uint8Array([
++  0x45, 0x43, 0x49, 0x45, 0x53, 0x3a, 0x41, 0x45, 0x53, 0x5f, 0x47, 0x43, 0x4d,
++  0x3a, 0x76, 0x31,
++]); // "ECIES:AES_GCM:v1"
++
++function bytesToHex(bytes: Uint8Array): string {
++  let out = '0x';
++  for (const b of bytes) out += b.toString(16).padStart(2, '0');
++  return out;
++}
++
++function hexToBytes(hex: string): Uint8Array {
++  const clean = hex.replace(/^0x/, '');
++  const out = new Uint8Array(clean.length / 2);
++  for (let i = 0; i < out.length; i++) {
++    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
++  }
++  return out;
++}
++
++type DataAccessMessage = {
++  userAddress: string;
++  encryptionPubKey: string;
++  notBefore: number;
++  expiresAt: number;
 +};
 +
-+export const NOX_CTOKENS: NoxCToken[] = [
++// Critical: the `message` we sign and the `payload` we send to the gateway
++// MUST be byte-identical (same notBefore/expiresAt). Recomputing `now` twice
++// yields different timestamps → signature verification fails with 401.
++function buildTypedData(userAddress: string, encryptionPubKey: string) {
++  const now = Math.floor(Date.now() / 1000);
++  const message: DataAccessMessage = {
++    userAddress,
++    encryptionPubKey,
++    notBefore: now,
++    expiresAt: now + 3600,
++  };
++  return {
++    types: {
++      EIP712Domain: [
++        { name: 'name', type: 'string' },
++        { name: 'version', type: 'string' },
++        { name: 'chainId', type: 'uint256' },
++        { name: 'verifyingContract', type: 'address' },
++      ],
++      DataAccessAuthorization: [
++        { name: 'userAddress', type: 'address' },
++        { name: 'encryptionPubKey', type: 'string' },
++        { name: 'notBefore', type: 'uint256' },
++        { name: 'expiresAt', type: 'uint256' },
++      ],
++    },
++    domain: {
++      name: 'Handle Gateway',
++      version: '1',
++      chainId: CHAIN_ID,
++      verifyingContract: NOX_COMPUTE,
++    },
++    primaryType: 'DataAccessAuthorization',
++    message,
++  };
++}
++
++function buildAuthorizationHeader(
++  message: DataAccessMessage,
++  signature: string,
++): string {
++  return `EIP712 ${btoa(JSON.stringify({ payload: message, signature }))}`;
++}
++
++async function generateEphemeralKeyPair(): Promise<{
++  publicKeyHex: string;
++  privateKey: CryptoKey;
++}> {
++  const keyPair = (await crypto.subtle.generateKey(
++    {
++      name: 'RSA-OAEP',
++      modulusLength: 2048,
++      publicExponent: new Uint8Array([0x01, 0x00, 0x01]),
++      hash: 'SHA-256',
++    },
++    true,
++    ['decrypt'],
++  )) as CryptoKeyPair;
++  const spki = await crypto.subtle.exportKey('spki', keyPair.publicKey);
++  return {
++    publicKeyHex: bytesToHex(new Uint8Array(spki)),
++    privateKey: keyPair.privateKey,
++  };
++}
++
++async function fetchCipher(
++  handle: string,
++  authHeader: string,
++): Promise<{ ciphertext: Uint8Array; iv: Uint8Array; encryptedSharedSecret: Uint8Array }> {
++  const res = await fetch(`${HANDLE_GATEWAY}/v0/secrets/${handle}`, {
++    headers: { Authorization: authHeader },
++  });
++  if (!res.ok) {
++    const body = await res.text();
++    throw new Error(`Gateway ${res.status}: ${body}`);
++  }
++  // Gateway response shape: { payload: {...}, signature }
++  const json = (await res.json()) as {
++    payload: {
++      handle: string;
++      ciphertext: string;
++      iv: string;
++      encryptedSharedSecret: string;
++    };
++    signature: string;
++  };
++  return {
++    ciphertext: hexToBytes(json.payload.ciphertext),
++    iv: hexToBytes(json.payload.iv),
++    encryptedSharedSecret: hexToBytes(json.payload.encryptedSharedSecret),
++  };
++}
++
++async function eciesDecrypt(
++  encryptedSharedSecret: Uint8Array,
++  iv: Uint8Array,
++  ciphertext: Uint8Array,
++  rsaPrivate: CryptoKey,
++): Promise<Uint8Array> {
++  const sharedSecretBuf = await crypto.subtle.decrypt(
++    { name: 'RSA-OAEP' },
++    rsaPrivate,
++    encryptedSharedSecret,
++  );
++  const keyMaterial = await crypto.subtle.importKey(
++    'raw',
++    new Uint8Array(sharedSecretBuf),
++    'HKDF',
++    false,
++    ['deriveKey'],
++  );
++  const aesKey = await crypto.subtle.deriveKey(
++    {
++      name: 'HKDF',
++      hash: 'SHA-256',
++      salt: new Uint8Array(32),
++      info: DERIVATION_INFO,
++    },
++    keyMaterial,
++    { name: 'AES-GCM', length: 256 },
++    false,
++    ['decrypt'],
++  );
++  const plainBuf = await crypto.subtle.decrypt(
++    { name: 'AES-GCM', iv, tagLength: 128 },
++    aesKey,
++    ciphertext,
++  );
++  return new Uint8Array(plainBuf);
++}
++
++/**
++ * Decode the plaintext bytes returned by the Handle Gateway.
++ *
++ * Nox handle layout (32 bytes):
++ *   byte 0     version
++ *   bytes 1-4  chainId (big-endian uint32)
++ *   byte 5     type code (SOLIDITY_TYPES index — uint256 = 35, uint16 = 5, etc.)
++ *   byte 6     attribute
++ *   bytes 7-31 random/unique
++ *
++ * For ERC-7984 balance/amount handles the type is uintN so we always decode
++ * the plaintext as a big-endian unsigned integer.
++ */
++function decodePlaintext(handleHex: string, plain: Uint8Array): bigint {
++  const bytes = hexToBytes(handleHex);
++  const typeCode = bytes[5];
++  // Accept any uintN (4..35) or intN (36..67)
++  if (typeCode < 4 || typeCode > 67) {
++    throw new Error(`Unsupported handle type code ${typeCode}`);
++  }
++  let value = 0n;
++  for (const b of plain) value = (value << 8n) + BigInt(b);
++  return value;
++}
++
++export async function noxDecrypt(
++  userAddress: string,
++  handle: string,
++): Promise<bigint> {
++  const { publicKeyHex, privateKey } = await generateEphemeralKeyPair();
++  const typedData = buildTypedData(userAddress, publicKeyHex);
++  const signature = await noxSignTypedDataV4(typedData, userAddress);
++  // Reuse the exact same message that was signed, otherwise the gateway
++  // recomputes the EIP-712 digest with different timestamps and rejects.
++  const headerValue = buildAuthorizationHeader(typedData.message, signature);
++
++  const { ciphertext, iv, encryptedSharedSecret } = await fetchCipher(handle, headerValue);
++  const plain = await eciesDecrypt(encryptedSharedSecret, iv, ciphertext, privateKey);
++  return decodePlaintext(handle, plain);
++}
+diff --git a/ui/components/app/assets/private-balance-tab/nox-rpc.ts b/ui/components/app/assets/private-balance-tab/nox-rpc.ts
+new file mode 100644
+index 0000000..d415e86
+--- /dev/null
++++ b/ui/components/app/assets/private-balance-tab/nox-rpc.ts
+@@ -0,0 +1,344 @@
++const ARB_SEPOLIA_RPC = 'https://sepolia-rollup.arbitrum.io/rpc';
++const ZERO_HANDLE = '0x' + '00'.repeat(32);
++
++const HANDLE_GATEWAY =
++  'https://2e1800fc0dddeeadc189283ed1dce13c1ae28d48-3000.apps.ovh-tdx-dev.noxprotocol.dev';
++
++export const NOX_DAPP_ORIGIN =
++  (globalThis as { VITE_NOX_APP_ORIGIN?: string }).VITE_NOX_APP_ORIGIN ||
++  'http://localhost:5180';
++
++// Selector for confidentialBalanceOf(address) returning bytes32.
++// keccak256("confidentialBalanceOf(address)").slice(0, 4) = 0x344ff101
++const CONFIDENTIAL_BALANCE_OF_SELECTOR = '0x344ff101';
++
++function addrToCallData(address: string): string {
++  const clean = address.toLowerCase().replace(/^0x/, '').padStart(64, '0');
++  return CONFIDENTIAL_BALANCE_OF_SELECTOR + clean;
++}
++
++export async function fetchBalanceHandle(
++  token: string,
++  owner: string,
++): Promise<{ handle: string; zero: boolean }> {
++  const body = {
++    jsonrpc: '2.0',
++    id: 1,
++    method: 'eth_call',
++    params: [
++      { to: token, data: addrToCallData(owner) },
++      'latest',
++    ],
++  };
++
++  const res = await fetch(ARB_SEPOLIA_RPC, {
++    method: 'POST',
++    headers: { 'content-type': 'application/json' },
++    body: JSON.stringify(body),
++  });
++  if (!res.ok) throw new Error(`RPC ${res.status}: ${await res.text()}`);
++
++  const json = (await res.json()) as { result?: string; error?: { message: string } };
++  if (json.error) throw new Error(`RPC error: ${json.error.message}`);
++  if (!json.result || json.result.length !== 66) {
++    throw new Error(`Unexpected RPC result: ${JSON.stringify(json)}`);
++  }
++  return {
++    handle: json.result,
++    zero: json.result === ZERO_HANDLE,
++  };
++}
++
++type DeepLinkAction = 'decrypt' | 'send' | 'shield';
++
++export function buildDappDeepLink(
++  action: DeepLinkAction,
++  params: { token?: string; handle?: string } = {},
++): string {
++  const base = `${NOX_DAPP_ORIGIN}/`;
++  const q = new URLSearchParams();
++  q.set('view', action);
++  if (params.token) q.set('token', params.token);
++  if (params.handle) q.set('handle', params.handle);
++  return `${base}?${q.toString()}`;
++}
++
++/** POST /v0/secrets — encrypts an input via the Handle Gateway. No EIP-712
++ *  auth needed (ACL is enforced later on-chain via the inputProof). */
++export async function encryptUint256(
++  applicationContract: string,
++  owner: string,
++  amount: bigint,
++): Promise<{ handle: `0x${string}`; proof: `0x${string}` }> {
++  // Gateway expects the value encoded as 32-byte big-endian hex for uint256
++  const valueHex = '0x' + amount.toString(16).padStart(64, '0');
++  const res = await fetch(`${HANDLE_GATEWAY}/v0/secrets`, {
++    method: 'POST',
++    headers: { 'content-type': 'application/json' },
++    body: JSON.stringify({
++      value: valueHex,
++      solidityType: 'uint256',
++      applicationContract,
++      owner,
++    }),
++  });
++  if (!res.ok) {
++    throw new Error(`Gateway ${res.status}: ${await res.text()}`);
++  }
++  // Gateway returns { payload: { handle, proof }, signature }
++  const json = (await res.json()) as {
++    payload: { handle: string; proof: string };
++    signature: string;
++  };
++  return {
++    handle: json.payload.handle as `0x${string}`,
++    proof: json.payload.proof as `0x${string}`,
++  };
++}
++
++// ---- Calldata encoders (manual, no viem import to keep bundle small) -------
++
++function padAddress(addr: string): string {
++  return addr.toLowerCase().replace(/^0x/, '').padStart(64, '0');
++}
++function padUint(v: bigint): string {
++  return v.toString(16).padStart(64, '0');
++}
++function stripHex(h: string): string {
++  return h.replace(/^0x/, '');
++}
++
++export function encodeApprove(spender: string, amount: bigint): `0x${string}` {
++  // approve(address,uint256) selector
++  return ('0x095ea7b3' + padAddress(spender) + padUint(amount)) as `0x${string}`;
++}
++
++export function encodeWrap(to: string, amount: bigint): `0x${string}` {
++  // wrap(address,uint256) selector
++  return ('0xbf376c7a' + padAddress(to) + padUint(amount)) as `0x${string}`;
++}
++
++function encodeDynamicBytes(data: string): string {
++  const hex = stripHex(data);
++  const length = padUint(BigInt(hex.length / 2));
++  const padCount = (64 - (hex.length % 64)) % 64;
++  return length + hex + '0'.repeat(padCount);
++}
++
++export function encodeConfidentialTransfer(
++  to: string,
++  handle: string,
++  inputProof: string,
++): `0x${string}` {
++  return (
++    '0x2fb74e62' +
++    padAddress(to) +
++    stripHex(handle) +
++    padUint(0x60n) +
++    encodeDynamicBytes(inputProof)
++  ) as `0x${string}`;
++}
++
++export function encodeUnwrap(
++  from: string,
++  to: string,
++  encryptedAmount: string,
++  inputProof: string,
++): `0x${string}` {
++  // unwrap(address,address,bytes32,bytes)  selector 0x5bf4ef06
++  // Head: from(32) + to(32) + handle(32) + offset-to-bytes(32 = 0x80)
++  // Tail: length(32) + data_padded
++  return (
++    '0x5bf4ef06' +
++    padAddress(from) +
++    padAddress(to) +
++    stripHex(encryptedAmount) +
++    padUint(0x80n) +
++    encodeDynamicBytes(inputProof)
++  ) as `0x${string}`;
++}
++
++export function encodeFinalizeUnwrap(
++  unwrapRequestId: string,
++  decryptedAmountAndProof: string,
++): `0x${string}` {
++  // finalizeUnwrap(bytes32,bytes)  selector 0x65f94fdb
++  return (
++    '0x65f94fdb' +
++    stripHex(unwrapRequestId) +
++    padUint(0x40n) +
++    encodeDynamicBytes(decryptedAmountAndProof)
++  ) as `0x${string}`;
++}
++
++export function encodeAddViewer(handle: string, viewer: string): `0x${string}` {
++  // addViewer(bytes32,address)  selector 0x10ff39ca
++  return ('0x10ff39ca' + stripHex(handle) + padAddress(viewer)) as `0x${string}`;
++}
++
++// ---- Public decrypt polling (for unwrap finalize proof) --------------------
++
++const UNWRAP_REQUESTED_TOPIC =
++  '0x77d02d353c5629272875d11f1b34ec4c65d7430b075575b78cd2502034c469ee';
++
++/**
++ * Parses a tx receipt's logs and returns the unwrapRequestId emitted by
++ * UnwrapRequested(address indexed to, bytes32 unwrapRequestId). The second
++ * field is non-indexed, so it lives in `data` (no topics beyond the
++ * indexed `to` address).
++ */
++export function parseUnwrapRequestIdFromLogs(
++  logs: readonly { address: string; topics: readonly string[]; data: string }[],
++  wrapperAddress: string,
++): `0x${string}` | null {
++  for (const l of logs) {
++    if (l.address.toLowerCase() !== wrapperAddress.toLowerCase()) continue;
++    if (l.topics[0]?.toLowerCase() !== UNWRAP_REQUESTED_TOPIC) continue;
++    // Non-indexed bytes32 is the first 32 bytes of data
++    const data = l.data.replace(/^0x/, '');
++    if (data.length < 64) continue;
++    return ('0x' + data.slice(0, 64)) as `0x${string}`;
++  }
++  return null;
++}
++
++const CONFIDENTIAL_TRANSFER_TOPIC =
++  '0x67500e8d0ed826d2194f514dd0d8124f35648ab6e3fb5e6ed867134cffe661e9';
++
++export type TransferEvent = {
++  token: `0x${string}`;
++  from: `0x${string}`;
++  to: `0x${string}`;
++  amountHandle: `0x${string}`;
++  txHash: `0x${string}`;
++  blockNumber: number;
++  direction: 'in' | 'out';
++};
++
++function addrTopic(addr: string): string {
++  return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(64, '0');
++}
++
++/**
++ * Fetch ConfidentialTransfer events involving `user` on the given token
++ * contracts in the last `lookbackBlocks` blocks. Merges "sent" and
++ * "received" into a single chronologically-sorted list.
++ */
++export async function fetchRecentTransfers(
++  user: string,
++  tokens: readonly string[],
++  // Arbitrum Sepolia produces a block every ~250ms, so 2M blocks ≈ 6 days.
++  { lookbackBlocks = 2_000_000, head = 30 }: { lookbackBlocks?: number; head?: number } = {},
++): Promise<TransferEvent[]> {
++  // Get latest block
++  const headRes = await fetch(ARB_SEPOLIA_RPC, {
++    method: 'POST',
++    headers: { 'content-type': 'application/json' },
++    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
++  });
++  const { result: latestHex } = (await headRes.json()) as { result: string };
++  const latest = parseInt(latestHex, 16);
++  const fromBlock = '0x' + Math.max(0, latest - lookbackBlocks).toString(16);
++  const toBlock = '0x' + latest.toString(16);
++  const userTopic = addrTopic(user);
++
++  async function getLogs(topics: (string | null | string[])[]): Promise<TransferEvent[]> {
++    const res = await fetch(ARB_SEPOLIA_RPC, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({
++        jsonrpc: '2.0', id: 1, method: 'eth_getLogs',
++        params: [{
++          address: tokens as string[],
++          topics, fromBlock, toBlock,
++        }],
++      }),
++    });
++    const json = (await res.json()) as {
++      result?: {
++        address: string; topics: string[]; data: string;
++        transactionHash: string; blockNumber: string;
++      }[];
++      error?: { message: string };
++    };
++    if (json.error) throw new Error(json.error.message);
++    return (json.result ?? []).map((l) => ({
++      token: l.address as `0x${string}`,
++      from: ('0x' + l.topics[1].slice(26)) as `0x${string}`,
++      to: ('0x' + l.topics[2].slice(26)) as `0x${string}`,
++      // Per ERC-7984: event ConfidentialTransfer(address indexed from,
++      // address indexed to, euint256 indexed amount) — amount is an indexed
++      // bytes32 (topics[3]), not in data.
++      amountHandle: (l.topics[3] ?? '0x' + '0'.repeat(64)) as `0x${string}`,
++      txHash: l.transactionHash as `0x${string}`,
++      blockNumber: parseInt(l.blockNumber, 16),
++      direction: 'in', // filled by caller
++    }));
++  }
++
++  const [outLogs, inLogs] = await Promise.all([
++    getLogs([CONFIDENTIAL_TRANSFER_TOPIC, userTopic, null]).then((ls) =>
++      ls.map((l) => ({ ...l, direction: 'out' as const })),
++    ),
++    getLogs([CONFIDENTIAL_TRANSFER_TOPIC, null, userTopic]).then((ls) =>
++      ls.map((l) => ({ ...l, direction: 'in' as const })),
++    ),
++  ]);
++
++  const all = [...outLogs, ...inLogs];
++  // Dedupe (same tx can appear twice if user sends to self)
++  const byKey = new Map<string, TransferEvent>();
++  for (const e of all) {
++    byKey.set(`${e.txHash}:${e.direction}`, e);
++  }
++  return Array.from(byKey.values())
++    .sort((a, b) => b.blockNumber - a.blockNumber)
++    .slice(0, head);
++}
++
++/**
++ * Poll the Handle Gateway for publicDecrypt of a handle that has just been
++ * marked publicly decryptable on-chain (e.g. the burn handle from unwrap).
++ * Returns the signed decryption proof (signature || ABI-encoded plaintext)
++ * that finalizeUnwrap can verify on-chain.
++ */
++export async function publicDecryptProof(
++  handle: string,
++  { attempts = 10, initialDelayMs = 3000 } = {},
++): Promise<{ decryptionProof: `0x${string}`; plaintext: bigint }> {
++  let lastErr: unknown;
++  for (let i = 0; i < attempts; i++) {
++    try {
++      const res = await fetch(`${HANDLE_GATEWAY}/v0/public/${handle}`);
++      if (res.status === 404) {
++        throw new Error('Object not found');
++      }
++      if (!res.ok) {
++        throw new Error(`Gateway ${res.status}: ${await res.text()}`);
++      }
++      const json = (await res.json()) as
++        | { decryptionProof: string }
++        | { payload: { decryptionProof: string }; signature: string };
++      const decryptionProof =
++        ('decryptionProof' in json
++          ? json.decryptionProof
++          : json.payload.decryptionProof) as `0x${string}`;
++      // Proof layout: 65-byte sig + ABI-encoded value.
++      // For uint256 that's 32 bytes → read directly.
++      const hex = decryptionProof.replace(/^0x/, '');
++      const plaintextHex = hex.slice(65 * 2);
++      let plaintext = 0n;
++      for (let j = 0; j < plaintextHex.length; j += 2) {
++        plaintext = (plaintext << 8n) + BigInt(parseInt(plaintextHex.slice(j, j + 2), 16));
++      }
++      return { decryptionProof, plaintext };
++    } catch (err) {
++      lastErr = err;
++      const msg = (err as Error).message ?? '';
++      const isLag = msg.includes('Object not found') || msg.includes('404');
++      if (!isLag) throw err;
++      await new Promise((r) => setTimeout(r, initialDelayMs * (i + 1)));
++    }
++  }
++  throw lastErr;
++}
+diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
+new file mode 100644
+index 0000000..389e4ab
+--- /dev/null
++++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
+@@ -0,0 +1,1011 @@
++import React, { useCallback, useEffect, useState } from 'react';
++import { useSelector } from 'react-redux';
++import {
++  Box,
++  Button,
++  ButtonSize,
++  ButtonVariant,
++  Icon,
++  IconName,
++  IconSize,
++  Text,
++} from '../../../component-library';
++import {
++  AlignItems,
++  BackgroundColor,
++  BorderColor,
++  BorderRadius,
++  Display,
++  FlexDirection,
++  IconColor,
++  JustifyContent,
++  TextColor,
++  TextVariant,
++} from '../../../../helpers/constants/design-system';
++import { getSelectedAddress } from '../../../../selectors';
++import { getSelectedNetworkClientId } from '../../../../../shared/lib/selectors/networks';
++import { addTransaction } from '../../../../store/actions';
++import { TransactionType } from '@metamask/transaction-controller';
++import {
++  encodeAddViewer,
++  encodeApprove,
++  encodeConfidentialTransfer,
++  encodeFinalizeUnwrap,
++  encodeUnwrap,
++  encodeWrap,
++  encryptUint256,
++  fetchBalanceHandle,
++  fetchRecentTransfers,
++  parseUnwrapRequestIdFromLogs,
++  publicDecryptProof,
++  type TransferEvent,
++} from './nox-rpc';
++import { noxDecrypt } from './nox-client';
++
++const NOX_COMPUTE: `0x${string}` = '0xd464B198f06756a1d00be223634b85E0a731c229';
++const ARB_SEPOLIA_RPC = 'https://sepolia-rollup.arbitrum.io/rpc';
++
++async function waitReceipt(txHash: string, { timeoutMs = 60000 } = {}) {
++  const t0 = Date.now();
++  while (Date.now() - t0 < timeoutMs) {
++    const res = await fetch(ARB_SEPOLIA_RPC, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({
++        jsonrpc: '2.0',
++        id: 1,
++        method: 'eth_getTransactionReceipt',
++        params: [txHash],
++      }),
++    });
++    const { result } = (await res.json()) as {
++      result: null | {
++        status: string;
++        blockNumber: string;
++        logs: { address: string; topics: string[]; data: string }[];
++      };
++    };
++    if (result) return result;
++    await new Promise((r) => setTimeout(r, 2000));
++  }
++  throw new Error(`Receipt timeout for ${txHash}`);
++}
++
++function shortAddress(addr: string): string {
++  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
++}
++
++// chrome.storage.session cache: survives side-panel remount within the same
++// browser session (wiped on browser close). The side panel is destroyed and
++// recreated when the EIP-712 signature popup takes focus, so a module-level
++// Map doesn't survive — we need real persistent storage but session-scoped
++// because the decrypted plaintext is sensitive.
++//
++// In-memory hot cache avoids an async round-trip on every render.
++const hotCache = new Map<string, bigint>();
++const inflightDecrypts = new Map<string, Promise<bigint>>();
++
++const cacheKey = (user: string, handle: string) =>
++  `nox:decrypt:${user.toLowerCase()}|${handle.toLowerCase()}`;
++
++type SessionStorageArea = {
++  get(keys: string | string[]): Promise<Record<string, unknown>>;
++  set(items: Record<string, unknown>): Promise<void>;
++};
++
++function getSessionStorage(): SessionStorageArea | null {
++  const chromeRef = (globalThis as { chrome?: { storage?: { session?: SessionStorageArea } } }).chrome;
++  return chromeRef?.storage?.session ?? null;
++}
++
++async function loadCachedValue(key: string): Promise<bigint | undefined> {
++  if (hotCache.has(key)) return hotCache.get(key);
++  const storage = getSessionStorage();
++  if (!storage) return undefined;
++  try {
++    const out = await storage.get(key);
++    const raw = out[key];
++    if (typeof raw === 'string') {
++      const v = BigInt(raw);
++      hotCache.set(key, v);
++      return v;
++    }
++  } catch { /* noop */ }
++  return undefined;
++}
++
++async function saveCachedValue(key: string, value: bigint): Promise<void> {
++  hotCache.set(key, value);
++  const storage = getSessionStorage();
++  if (!storage) return;
++  try {
++    await storage.set({ [key]: value.toString() });
++  } catch { /* noop */ }
++}
++
++// Known ERC-7984 confidential tokens on Arbitrum Sepolia (chainId 421614).
++// Today there's no public ERC-7984 registry, so this list is curated; we
++// filter at runtime to only render tokens where the user has a non-zero
++// balance (true "scrape" experience without full-log indexing).
++const NOX_CTOKENS = [
 +  {
 +    // cdefi.iex.ec official Confidential USDC wrapper
 +    address: '0x1CCeC6bC60dB15E4055D43Dc2531BB7D4E5B808e',
 +    symbol: 'cUSDC',
 +    name: 'Confidential USDC',
 +    network: 'Arbitrum Sepolia',
-+    chainId: 421614,
 +    underlying: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
 +    underlyingSymbol: 'USDC',
 +    decimals: 6,
@@ -40,1073 +788,24 @@ index 0000000..1c3bd1f
 +    symbol: 'cUSDC',
 +    name: 'Confidential USDC (Nox demo)',
 +    network: 'Arbitrum Sepolia',
-+    chainId: 421614,
 +    underlying: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
 +    underlyingSymbol: 'USDC',
 +    decimals: 6,
 +  },
 +];
 +
-+/**
-+ * Find a confidential wrapper whose underlying ERC-20 matches the given
-+ * address (case-insensitive). Returns the first match; some assets have
-+ * multiple wrappers (e.g. official + demo) so this is a "is there at least
-+ * one wrapper?" check rather than a strict 1-to-1 lookup.
-+ */
-+export function findWrapperByUnderlying(
-+  underlyingAddress: string,
-+  chainId?: number,
-+): NoxCToken | undefined {
-+  const want = underlyingAddress.toLowerCase();
-+  return NOX_CTOKENS.find(
-+    (t) =>
-+      t.underlying.toLowerCase() === want &&
-+      (chainId === undefined || t.chainId === chainId),
-+  );
-+}
++type LoadState =
++  | { status: 'idle' }
++  | { status: 'loading' }
++  | { status: 'ok'; handle: string; zero: boolean }
++  | { status: 'error'; message: string };
 +
-+/**
-+ * Same as findWrapperByUnderlying but returns true/false. Used by the asset
-+ * page to decide whether to render the Shield button.
-+ */
-+export function hasConfidentialWrapper(
-+  underlyingAddress: string,
-+  chainId?: number,
-+): boolean {
-+  return findWrapperByUnderlying(underlyingAddress, chainId) !== undefined;
-+}
-+
-+// Intent key written to chrome.storage.session when the user clicks Shield
-+// from the public ERC-20 detail page. The cTokens tab consumes it on mount
-+// to auto-open the Shield form on the matching CTokenCard.
-+export const AUTO_OPEN_SHIELD_KEY = 'nox:autoOpenShield';
-+export const AUTO_OPEN_SHIELD_TTL_MS = 30_000;
-+
-+export type AutoOpenShieldIntent = {
-+  underlying: string;
-+  chainId: number;
-+  ts: number;
-+};
-+
-+// Pending shield intent: the /shield page captures user input then writes
-+// this and navigates to home/cTokens. The cTokens tab actually runs the
-+// 2-step approve+wrap because IT lives on the home route and survives
-+// MetaMask's post-confirmation redirect — whereas /shield gets unmounted
-+// the moment the first popup is confirmed.
-+export const PENDING_SHIELD_KEY = 'nox:pendingShield';
-+export const PENDING_SHIELD_TTL_MS = 60_000;
-+
-+export type PendingShieldIntent = {
-+  underlying: string;
-+  wrapper: string;
-+  chainId: number;
-+  amountRaw: string; // bigint serialized; chrome.storage doesn't take bigint
-+  ts: number;
-+};
-diff --git a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-index 389e4ab..9e3d505 100644
---- a/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-+++ b/ui/components/app/assets/private-balance-tab/private-balance-tab.tsx
-@@ -1,5 +1,5 @@
--import React, { useCallback, useEffect, useState } from 'react';
--import { useSelector } from 'react-redux';
-+import React, { useCallback, useEffect, useRef, useState } from 'react';
-+import { useDispatch, useSelector } from 'react-redux';
- import {
-   Box,
-   Button,
-@@ -17,14 +17,17 @@ import {
-   BorderRadius,
-   Display,
-   FlexDirection,
--  IconColor,
-+  FlexWrap,
-   JustifyContent,
-   TextColor,
-   TextVariant,
- } from '../../../../helpers/constants/design-system';
- import { getSelectedAddress } from '../../../../selectors';
--import { getSelectedNetworkClientId } from '../../../../../shared/lib/selectors/networks';
--import { addTransaction } from '../../../../store/actions';
-+import {
-+  getNetworkConfigurationsByChainId,
-+  getSelectedNetworkClientId,
-+} from '../../../../../shared/lib/selectors/networks';
-+import { addNetwork, addTransactionAndWaitForPublish } from '../../../../store/actions';
- import { TransactionType } from '@metamask/transaction-controller';
- import {
-   encodeAddViewer,
-@@ -35,12 +38,19 @@ import {
-   encodeWrap,
-   encryptUint256,
-   fetchBalanceHandle,
--  fetchRecentTransfers,
-   parseUnwrapRequestIdFromLogs,
-   publicDecryptProof,
--  type TransferEvent,
- } from './nox-rpc';
- import { noxDecrypt } from './nox-client';
-+import {
-+  AUTO_OPEN_SHIELD_KEY,
-+  AUTO_OPEN_SHIELD_TTL_MS,
-+  NOX_CTOKENS,
-+  PENDING_SHIELD_KEY,
-+  PENDING_SHIELD_TTL_MS,
-+  type AutoOpenShieldIntent,
-+  type PendingShieldIntent,
-+} from './nox-tokens';
- 
- const NOX_COMPUTE: `0x${string}` = '0xd464B198f06756a1d00be223634b85E0a731c229';
- const ARB_SEPOLIA_RPC = 'https://sepolia-rollup.arbitrum.io/rpc';
-@@ -123,32 +133,41 @@ async function saveCachedValue(key: string, value: bigint): Promise<void> {
-   } catch { /* noop */ }
- }
- 
--// Known ERC-7984 confidential tokens on Arbitrum Sepolia (chainId 421614).
--// Today there's no public ERC-7984 registry, so this list is curated; we
--// filter at runtime to only render tokens where the user has a non-zero
--// balance (true "scrape" experience without full-log indexing).
--const NOX_CTOKENS = [
--  {
--    // cdefi.iex.ec official Confidential USDC wrapper
--    address: '0x1CCeC6bC60dB15E4055D43Dc2531BB7D4E5B808e',
--    symbol: 'cUSDC',
--    name: 'Confidential USDC',
--    network: 'Arbitrum Sepolia',
--    underlying: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
--    underlyingSymbol: 'USDC',
--    decimals: 6,
--  },
--  {
--    // Our own demo wrapper (also backed by Circle USDC) — shown if funded
--    address: '0x52a12dC4558063AB2a451f52DA721F24Cae72DeC',
--    symbol: 'cUSDC',
--    name: 'Confidential USDC (Nox demo)',
--    network: 'Arbitrum Sepolia',
--    underlying: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
--    underlyingSymbol: 'USDC',
--    decimals: 6,
--  },
--];
-+// "Decrypt in progress" marker. Written before noxDecrypt() so that if the
-+// side panel is destroyed while the user is signing, the freshly-mounted
-+// panel can show a spinner (instead of jumping back to "hidden") until the
-+// dying panel's saveCachedValue lands.
-+const intentKey = (key: string) => `${key}:pending`;
-+const PENDING_TTL_MS = 30_000;
-+
-+async function markPendingDecrypt(key: string): Promise<void> {
-+  const storage = getSessionStorage();
-+  if (!storage) return;
-+  try { await storage.set({ [intentKey(key)]: Date.now() }); } catch { /* noop */ }
-+}
-+
-+async function clearPendingDecrypt(key: string): Promise<void> {
-+  const storage = getSessionStorage();
-+  if (!storage) return;
-+  // chrome.storage.session.remove isn't in our minimal type; cast through.
-+  const removable = (storage as unknown as { remove?: (k: string) => Promise<void> }).remove;
-+  if (removable) {
-+    try { await removable.call(storage, intentKey(key)); } catch { /* noop */ }
-+  }
-+}
-+
-+async function isDecryptPending(key: string): Promise<boolean> {
-+  const storage = getSessionStorage();
-+  if (!storage) return false;
-+  try {
-+    const out = await storage.get(intentKey(key));
-+    const ts = out[intentKey(key)];
-+    return typeof ts === 'number' && Date.now() - ts < PENDING_TTL_MS;
-+  } catch { return false; }
-+}
-+
-+// NOX_CTOKENS now lives in ./nox-tokens.ts so that the asset details page
-+// (which decides when to render the Shield button) shares the same registry.
- 
- type LoadState =
-   | { status: 'idle' }
-@@ -197,23 +216,7 @@ type FlowStatus =
- // USDC brand blue — displayed when the underlying is Circle's USDC
- const USDC_BLUE = '#2775CA';
- 
--function USDCGlyph() {
--  // Simplified USDC "$" mark, inspired by Circle's brand. Inline SVG keeps
--  // the bundle small and stays in the SES sandbox (no remote fetch).
--  return (
--    <svg width="22" height="22" viewBox="0 0 36 36" fill="none">
--      <path
--        d="M18 6.5c.6 0 1 .4 1 1v.9a5 5 0 0 1 4.2 4.7c0 .5-.4 1-1 1h-.7c-.5 0-.9-.3-1-.8-.3-1.3-1.4-2.2-2.8-2.2-1.7 0-3 1-3 2.4 0 1 .6 1.9 2 2.4l2.5.8c3 1 4.3 2.4 4.3 4.7 0 2.5-1.8 4.5-4.5 5v.9c0 .6-.4 1-1 1s-1-.4-1-1v-.9a5 5 0 0 1-4.3-4.7c0-.5.4-1 1-1h.7c.5 0 .9.3 1 .8.3 1.3 1.4 2.2 2.9 2.2 1.9 0 3.2-1 3.2-2.5 0-1.1-.7-1.9-2.3-2.5l-2.4-.8c-2.9-1-4.2-2.4-4.2-4.6 0-2.4 1.8-4.3 4.4-4.8V7.5c0-.6.4-1 1-1Z"
--        fill="#fff"
--      />
--    </svg>
--  );
--}
--
--function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
--  // Simplified: plain circle with the first letter. Previous version had an
--  // inline SVG glyph + a positioned lock badge which was crashing on render
--  // inside some React flows — reverted to the stable original.
-+function TokenLogo({ symbol }: { symbol: string }) {
-   const letter = symbol.replace(/^c/i, '').charAt(0).toUpperCase() || '?';
-   return (
-     <div
-@@ -235,94 +238,6 @@ function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
-   );
- }
- 
--function ActivitySection({ activity }: { activity: TransferEvent[] | 'loading' | null }) {
--  if (activity === null) return null;
--  return (
--    <Box marginTop={4}>
--      <Box
--        display={Display.Flex}
--        alignItems={AlignItems.center}
--        gap={2}
--        marginBottom={2}
--      >
--        <Text variant={TextVariant.bodyMdMedium}>Recent activity</Text>
--        <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
--          · confidential transfers
--        </Text>
--      </Box>
--
--      {activity === 'loading' && (
--        <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
--          Scanning logs…
--        </Text>
--      )}
--
--      {Array.isArray(activity) && activity.length === 0 && (
--        <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
--          No recent transfers.
--        </Text>
--      )}
--
--      {Array.isArray(activity) && activity.length > 0 && (
--        <div
--          style={{
--            border: '1px solid var(--color-border-muted)',
--            borderRadius: 8,
--            overflow: 'hidden',
--          }}
--        >
--          {activity.map((ev, i) => {
--            const tokenMeta = NOX_CTOKENS.find(
--              (t) => t.address.toLowerCase() === ev.token.toLowerCase(),
--            );
--            const counterparty = ev.direction === 'out' ? ev.to : ev.from;
--            const label = ev.direction === 'out' ? 'Sent' : 'Received';
--            const prep = ev.direction === 'out' ? 'to' : 'from';
--            const arrow =
--              ev.direction === 'out' ? IconName.Arrow2UpRight : IconName.Arrow2Down;
--            const arrowColor =
--              ev.direction === 'out' ? IconColor.errorDefault : IconColor.successDefault;
--            return (
--              <a
--                key={`${ev.txHash}:${ev.direction}:${i}`}
--                href={`https://sepolia.arbiscan.io/tx/${ev.txHash}`}
--                target="_blank"
--                rel="noopener noreferrer"
--                style={{
--                  display: 'flex',
--                  alignItems: 'center',
--                  gap: 10,
--                  padding: '10px 12px',
--                  borderBottom:
--                    i === activity.length - 1
--                      ? 'none'
--                      : '1px solid var(--color-border-muted)',
--                  color: 'inherit',
--                  textDecoration: 'none',
--                }}
--              >
--                <Icon name={arrow} size={IconSize.Sm} color={arrowColor} />
--                <div style={{ flex: 1, minWidth: 0 }}>
--                  <div style={{ fontSize: 13, fontWeight: 500 }}>
--                    {label} {tokenMeta?.symbol ?? 'cToken'} {prep}{' '}
--                    <span style={{ fontFamily: 'monospace', color: 'var(--color-text-alternative)' }}>
--                      {counterparty.slice(0, 6)}…{counterparty.slice(-4)}
--                    </span>
--                  </div>
--                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
--                    block #{String(ev.blockNumber)} · encrypted amount
--                  </div>
--                </div>
--                <Icon name={IconName.Export} size={IconSize.Xs} color={IconColor.iconMuted} />
--              </a>
--            );
--          })}
--        </div>
--      )}
--    </Box>
--  );
--}
--
- const inputStyle: React.CSSProperties = {
-   width: '100%', padding: '7px 9px', fontSize: 12,
-   background: 'transparent', color: 'inherit',
-@@ -425,6 +340,8 @@ function CTokenCard({
-   networkClientId,
-   load,
-   reveal,
-+  autoOpenAction,
-+  onAutoOpenConsumed,
-   onReveal,
-   onHide,
-   onBalanceChanged,
-@@ -434,6 +351,8 @@ function CTokenCard({
-   networkClientId: string;
-   load: LoadState;
-   reveal: RevealState;
-+  autoOpenAction?: Action | null;
-+  onAutoOpenConsumed?: () => void;
-   onReveal: () => void;
-   onHide: () => void;
-   onBalanceChanged: () => void;
-@@ -460,16 +379,29 @@ function CTokenCard({
-     setFlow({ status: 'idle' });
-   }, []);
- 
-+  // External request from the asset detail page: "open the Shield form for
-+  // this token automatically." Fires once per change of autoOpenAction.
-+  useEffect(() => {
-+    if (autoOpenAction && action === null) {
-+      openAction(autoOpenAction);
-+      onAutoOpenConsumed?.();
-+    }
-+  }, [autoOpenAction, action, openAction, onAutoOpenConsumed]);
-+
-   const dispatchTx = useCallback(
-     async (to: string, data: `0x${string}`, type: TransactionType) => {
--      const txMeta = await addTransaction(
-+      // Use ...AndWaitForPublish (waitForSubmit: true) so txMeta.hash is set
-+      // by the time we await — the plain addTransaction resolves pre-publish
-+      // and would feed undefined to waitReceipt → 'invalid argument 0' RPC
-+      // error from the public Arbitrum node.
-+      const txMeta = await addTransactionAndWaitForPublish(
-         {
-           from: ownerAddress as `0x${string}`,
-           to: to as `0x${string}`,
-           data,
-           value: '0x0',
-           chainId: chainIdHex,
--        } as Parameters<typeof addTransaction>[0],
-+        } as Parameters<typeof addTransactionAndWaitForPublish>[0],
-         { networkClientId, type },
-       );
-       return txMeta.hash as string;
-@@ -607,7 +539,10 @@ function CTokenCard({
-   } else if (load.status === 'ok') {
-     revealed = (
-       <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textDefault}>
--        ******** {token.symbol}
-+        <span style={{ fontSize: '1.4em', letterSpacing: '0.18em', verticalAlign: '-0.05em' }}>
-+          •••••
-+        </span>{' '}
-+        {token.symbol}
-       </Text>
-     );
-   } else {
-@@ -619,7 +554,13 @@ function CTokenCard({
-       as="span"
-       variant={TextVariant.bodyXs}
-       color={TextColor.textMuted}
--      style={{ fontFamily: 'monospace' }}
-+      style={{
-+        fontFamily: 'monospace',
-+        overflow: 'hidden',
-+        textOverflow: 'ellipsis',
-+        whiteSpace: 'nowrap',
-+        display: 'block',
-+      }}
-     >
-       handle {shortHandle(load.handle)}
-     </Text>
-@@ -640,8 +581,14 @@ function CTokenCard({
-       gap={2}
-     >
-       <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
--        <TokenLogo symbol={token.symbol} underlyingSymbol={token.underlyingSymbol} />
--        <Box display={Display.Flex} flexDirection={FlexDirection.Column}>
-+        <Box style={{ flexShrink: 0 }}>
-+          <TokenLogo symbol={token.symbol} />
-+        </Box>
-+        <Box
-+          display={Display.Flex}
-+          flexDirection={FlexDirection.Column}
-+          style={{ minWidth: 0, flex: 1 }}
-+        >
-           <Text variant={TextVariant.bodyMdMedium}>
-             {token.symbol} · {token.network}
-           </Text>
-@@ -653,11 +600,35 @@ function CTokenCard({
-         On-chain balance is encrypted.
-       </Text>
- 
--      <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
--        Revealed: {revealed}
--      </Text>
-+      <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
-+        <Text variant={TextVariant.bodySm} color={TextColor.textAlternative} style={{ flex: 1, minWidth: 0 }}>
-+          Revealed: {revealed}
-+        </Text>
-+        <button
-+          type="button"
-+          onClick={isRevealed ? onHide : onReveal}
-+          disabled={!canDecrypt || isRevealing}
-+          aria-label={isRevealed ? 'Hide balance' : 'Reveal balance'}
-+          title={isRevealed ? 'Hide balance' : 'Reveal balance (signs an EIP-712 once per browser session)'}
-+          style={{
-+            background: 'transparent',
-+            border: 'none',
-+            padding: 4,
-+            cursor: canDecrypt && !isRevealing ? 'pointer' : 'default',
-+            color: 'var(--color-icon-default)',
-+            display: 'flex',
-+            alignItems: 'center',
-+            opacity: !canDecrypt || isRevealing ? 0.4 : 1,
-+          }}
-+        >
-+          <Icon
-+            name={isRevealed ? IconName.EyeSlash : IconName.Eye}
-+            size={IconSize.Sm}
-+          />
-+        </button>
-+      </Box>
- 
--      <Box display={Display.Flex} gap={2} flexWrap={undefined}>
-+      <Box display={Display.Flex} gap={2} flexWrap={FlexWrap.Wrap}>
-         <Button
-           variant={ButtonVariant.Secondary}
-           size={ButtonSize.Sm}
-@@ -694,14 +665,6 @@ function CTokenCard({
-         >
-           Share
-         </Button>
--        <Button
--          variant={ButtonVariant.Link}
--          size={ButtonSize.Sm}
--          onClick={isRevealed ? onHide : onReveal}
--          disabled={!canDecrypt || isRevealing}
--        >
--          {isRevealed ? 'Hide' : isRevealing ? '…' : 'Decrypt'}
--        </Button>
-       </Box>
- 
-       {action !== null && (
-@@ -729,31 +692,232 @@ function CTokenCard({
- }
- 
- export default function PrivateBalanceTab() {
-+  const dispatch = useDispatch();
-   const ownerAddress = useSelector(getSelectedAddress) as string | undefined;
--  const networkClientId = useSelector(getSelectedNetworkClientId) as string;
-+  const selectedNetworkClientId = useSelector(getSelectedNetworkClientId) as string;
-+  const networkConfigsByChainId = useSelector(getNetworkConfigurationsByChainId) as
-+    | Record<string, {
-+        chainId: string;
-+        rpcEndpoints: { url: string; networkClientId: string; type: string; name?: string }[];
-+        defaultRpcEndpointIndex: number;
-+      }>
-+    | undefined;
-+  // Use the user's currently-selected chain for legacy callers that don't
-+  // know what chain they need; the Shield consumer overrides this with the
-+  // wrapper's chain-specific networkClientId so it doesn't get routed to
-+  // a broken Infura key on the wrong chain.
-+  const networkClientId = selectedNetworkClientId;
-   const [loads, setLoads] = useState<Record<string, LoadState>>({});
-   const [reveals, setReveals] = useState<Record<string, RevealState>>({});
-   const [refetchTick, setRefetchTick] = useState(0);
--  const [activity, setActivity] = useState<TransferEvent[] | 'loading' | null>(null);
--
--  // TEMPORARILY DISABLED — bisecting activity crash
--  // useEffect(() => {
--  //   if (!ownerAddress) return;
--  //   let cancelled = false;
--  //   setActivity('loading');
--  //   (async () => {
--  //     try {
--  //       const events = await fetchRecentTransfers(
--  //         ownerAddress,
--  //         NOX_CTOKENS.map((t) => t.address),
--  //       );
--  //       if (!cancelled) setActivity(events);
--  //     } catch {
--  //       if (!cancelled) setActivity([]);
--  //     }
--  //   })();
--  //   return () => { cancelled = true; };
--  // }, [ownerAddress, refetchTick]);
-+  // When the user clicks Shield from the public ERC-20 detail page, an
-+  // intent is written to chrome.storage.session and we navigate here with
-+  // the cTokens tab pre-selected. We pick it up on mount and forward it to
-+  // the matching CTokenCard which auto-opens its Shield form.
-+  const [autoOpen, setAutoOpen] = useState<{ tokenAddress: string; action: Action } | null>(null);
-+
-+  // Pending Shield intent: the /shield page captured the user's amount,
-+  // wrote it to storage, and navigated here. We run the proven sequential
-+  // approve→wait→wrap→wait flow from here because this tab is part of the
-+  // home route (where MetaMask sends the user after each popup confirm),
-+  // so it doesn't unmount mid-flow.
-+  type ShieldExec =
-+    | { status: 'idle' }
-+    | { status: 'busy'; label: string; underlyingSymbol: string; amount: string; symbol: string }
-+    | { status: 'done'; message: string }
-+    | { status: 'error'; message: string };
-+  const [shieldExec, setShieldExec] = useState<ShieldExec>({ status: 'idle' });
-+
-+  useEffect(() => {
-+    const storage = getSessionStorage();
-+    if (!storage) return;
-+    let cancelled = false;
-+    (async () => {
-+      try {
-+        const out = await storage.get(AUTO_OPEN_SHIELD_KEY);
-+        const raw = out[AUTO_OPEN_SHIELD_KEY] as AutoOpenShieldIntent | undefined;
-+        if (!raw || cancelled) return;
-+        if (Date.now() - raw.ts > AUTO_OPEN_SHIELD_TTL_MS) return;
-+        const match = NOX_CTOKENS.find(
-+          (t) =>
-+            t.underlying.toLowerCase() === raw.underlying.toLowerCase() &&
-+            t.chainId === raw.chainId,
-+        );
-+        if (match) setAutoOpen({ tokenAddress: match.address, action: 'shield' });
-+        const removable = (storage as unknown as { remove?: (k: string) => Promise<void> }).remove;
-+        if (removable) {
-+          try { await removable.call(storage, AUTO_OPEN_SHIELD_KEY); } catch { /* noop */ }
-+        }
-+      } catch { /* noop */ }
-+    })();
-+    return () => { cancelled = true; };
-+  }, []);
-+
-+  // Consume PENDING_SHIELD_KEY: run the actual approve+wrap flow.
-+  // Uses addTransactionAndWaitForPublish so the hash is set before we
-+  // await its receipt. Sequential — this tab is on home, doesn't unmount.
-+  useEffect(() => {
-+    if (!ownerAddress) return;
-+    const storage = getSessionStorage();
-+    if (!storage) {
-+      console.warn('[nox] cTokens: chrome.storage.session not available, cannot resume Shield');
-+      return;
-+    }
-+    let cancelled = false;
-+    (async () => {
-+      try {
-+        const out = await storage.get(PENDING_SHIELD_KEY);
-+        const raw = out[PENDING_SHIELD_KEY] as PendingShieldIntent | undefined;
-+        console.log('[nox] cTokens consumer poll', { hasIntent: !!raw, intent: raw });
-+        if (!raw || cancelled) return;
-+        if (Date.now() - raw.ts > PENDING_SHIELD_TTL_MS) {
-+          console.log('[nox] cTokens: pendingShield expired, skipping');
-+          return;
-+        }
-+        const match = NOX_CTOKENS.find(
-+          (t) =>
-+            t.underlying.toLowerCase() === raw.underlying.toLowerCase() &&
-+            t.chainId === raw.chainId,
-+        );
-+        // Clear the intent up-front so a re-mount doesn't kick off a
-+        // duplicate flow.
-+        const removable = (storage as unknown as { remove?: (k: string) => Promise<void> }).remove;
-+        if (removable) {
-+          try { await removable.call(storage, PENDING_SHIELD_KEY); } catch { /* noop */ }
-+        }
-+        if (!match) return;
-+
-+        const rawAmount = BigInt(raw.amountRaw);
-+        const formatted = formatAmount(rawAmount, match.decimals);
-+        const chainIdHex = `0x${match.chainId.toString(16)}` as `0x${string}`;
-+
-+        // Resolve a networkClientId that REALLY routes to chainIdHex.
-+        // Using the user's currently-selected networkClientId is wrong when
-+        // they're on a different chain (e.g. Mainnet) — MetaMask routes the
-+        // tx through that network's RPC (e.g. mainnet Infura with the
-+        // placeholder INFURA_PROJECT_ID=0000... in metamaskrc) and the
-+        // request comes back as 401 Unauthorized.
-+        const existingConfig = networkConfigsByChainId?.[chainIdHex];
-+        let chainNetworkClientId: string;
-+        if (existingConfig?.rpcEndpoints?.length) {
-+          const idx = existingConfig.defaultRpcEndpointIndex ?? 0;
-+          chainNetworkClientId = existingConfig.rpcEndpoints[idx]?.networkClientId
-+            ?? existingConfig.rpcEndpoints[0]!.networkClientId;
-+          console.log('[nox] using existing network', { chainIdHex, networkClientId: chainNetworkClientId, rpcUrl: existingConfig.rpcEndpoints[idx]?.url });
-+        } else {
-+          // No config for this chain → register one with the public RPC.
-+          console.log('[nox] no network config for', chainIdHex, '— adding Arbitrum Sepolia public RPC');
-+          const added = await dispatch(
-+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-+            addNetwork({
-+              chainId: chainIdHex,
-+              name: 'Arbitrum Sepolia',
-+              nativeCurrency: 'ETH',
-+              defaultRpcEndpointIndex: 0,
-+              defaultBlockExplorerUrlIndex: 0,
-+              blockExplorerUrls: ['https://sepolia.arbiscan.io'],
-+              rpcEndpoints: [
-+                {
-+                  url: 'https://sepolia-rollup.arbitrum.io/rpc',
-+                  type: 'custom',
-+                  name: 'Arbitrum Sepolia (public)',
-+                },
-+              ],
-+            } as any),
-+          ) as unknown as {
-+            rpcEndpoints?: { url: string; networkClientId: string }[];
-+            defaultRpcEndpointIndex?: number;
-+          } | undefined;
-+          if (!added?.rpcEndpoints?.length) {
-+            throw new Error('Failed to add Arbitrum Sepolia network');
-+          }
-+          chainNetworkClientId =
-+            added.rpcEndpoints[added.defaultRpcEndpointIndex ?? 0]!.networkClientId;
-+          console.log('[nox] added network, networkClientId:', chainNetworkClientId);
-+        }
-+
-+        setShieldExec({
-+          status: 'busy',
-+          label: `1/2 Approving ${formatted} ${match.underlyingSymbol} — sign in MetaMask…`,
-+          underlyingSymbol: match.underlyingSymbol,
-+          amount: formatted,
-+          symbol: match.symbol,
-+        });
-+
-+        // Step 1: approve
-+        const approveData = encodeApprove(match.address, rawAmount);
-+        console.log('[nox] dispatching approve', { to: match.underlying, networkClientId: chainNetworkClientId });
-+        const approveMeta = await addTransactionAndWaitForPublish(
-+          {
-+            from: ownerAddress as `0x${string}`,
-+            to: match.underlying as `0x${string}`,
-+            data: approveData,
-+            value: '0x0',
-+            chainId: chainIdHex,
-+          } as Parameters<typeof addTransactionAndWaitForPublish>[0],
-+          { networkClientId: chainNetworkClientId, type: TransactionType.tokenMethodApprove },
-+        );
-+        if (cancelled) return;
-+        setShieldExec({
-+          status: 'busy',
-+          label: '1/2 Waiting for approval to mine…',
-+          underlyingSymbol: match.underlyingSymbol,
-+          amount: formatted,
-+          symbol: match.symbol,
-+        });
-+        await waitReceipt(approveMeta.hash as string);
-+        if (cancelled) return;
-+
-+        // Step 2: wrap
-+        setShieldExec({
-+          status: 'busy',
-+          label: `2/2 Wrapping ${formatted} ${match.underlyingSymbol} → ${match.symbol} — sign in MetaMask…`,
-+          underlyingSymbol: match.underlyingSymbol,
-+          amount: formatted,
-+          symbol: match.symbol,
-+        });
-+        const wrapData = encodeWrap(ownerAddress, rawAmount);
-+        console.log('[nox] dispatching wrap', { to: match.address, networkClientId: chainNetworkClientId });
-+        const wrapMeta = await addTransactionAndWaitForPublish(
-+          {
-+            from: ownerAddress as `0x${string}`,
-+            to: match.address as `0x${string}`,
-+            data: wrapData,
-+            value: '0x0',
-+            chainId: chainIdHex,
-+          } as Parameters<typeof addTransactionAndWaitForPublish>[0],
-+          { networkClientId: chainNetworkClientId, type: TransactionType.contractInteraction },
-+        );
-+        if (cancelled) return;
-+        setShieldExec({
-+          status: 'busy',
-+          label: '2/2 Waiting for wrap to mine…',
-+          underlyingSymbol: match.underlyingSymbol,
-+          amount: formatted,
-+          symbol: match.symbol,
-+        });
-+        await waitReceipt(wrapMeta.hash as string);
-+        if (cancelled) return;
-+
-+        setShieldExec({
-+          status: 'done',
-+          message: `Shielded ${formatted} ${match.underlyingSymbol} → ${match.symbol}`,
-+        });
-+        // Trigger a balance refetch so the new cToken handle shows up.
-+        setRefetchTick((n) => n + 1);
-+      } catch (err) {
-+        if (!cancelled) {
-+          setShieldExec({ status: 'error', message: (err as Error).message });
-+        }
-+      }
-+    })();
-+    return () => { cancelled = true; };
-+  }, [ownerAddress, networkConfigsByChainId, dispatch]);
-+
-+  // Stable ref so the storage-change listener can read latest handles
-+  // without re-subscribing on every loads update.
-+  const loadsRef = useRef(loads);
-+  loadsRef.current = loads;
- 
-   useEffect(() => {
-     if (!ownerAddress) return;
-@@ -778,12 +942,21 @@ export default function PrivateBalanceTab() {
-             // handle already (survives side-panel remount after signing).
-             const key = cacheKey(ownerAddress, handle);
-             const cached = await loadCachedValue(key);
--            console.log('[nox] rehydrate check', { key, hit: cached !== undefined });
-             if (cached !== undefined && !cancelled) {
-               setReveals((prev) => ({
-                 ...prev,
-                 [token.address]: { status: 'ok', value: cached },
-               }));
-+            } else if (await isDecryptPending(key)) {
-+              // The previous panel was mid-decrypt when we got remounted.
-+              // Show a spinner; the storage listener below will flip us to
-+              // 'ok' as soon as the dying panel's saveCachedValue lands.
-+              if (!cancelled) {
-+                setReveals((prev) => ({
-+                  ...prev,
-+                  [token.address]: { status: 'fetching' },
-+                }));
-+              }
-             } else {
-               // Surface any persisted error from a previous failed decrypt
-               const storage = getSessionStorage();
-@@ -814,6 +987,42 @@ export default function PrivateBalanceTab() {
-     return () => { cancelled = true; };
-   }, [ownerAddress, refetchTick]);
- 
-+  // Watch chrome.storage.session for late writes from a dying side panel.
-+  // If the user clicked Decrypt and the panel was destroyed mid-flight,
-+  // saveCachedValue may land AFTER our rehydrate already fired with hit=false
-+  // — so we'd be stuck on the spinner. The listener catches the write.
-+  useEffect(() => {
-+    if (!ownerAddress) return;
-+    type ChangeListener = (
-+      changes: Record<string, { newValue?: unknown }>,
-+      areaName: string,
-+    ) => void;
-+    type ChromeStorage = {
-+      onChanged?: { addListener: (cb: ChangeListener) => void; removeListener: (cb: ChangeListener) => void };
-+    };
-+    const chromeStorage = (globalThis as { chrome?: { storage?: ChromeStorage } }).chrome?.storage;
-+    if (!chromeStorage?.onChanged) return;
-+
-+    const onChange: ChangeListener = (changes, areaName) => {
-+      if (areaName !== 'session') return;
-+      for (const t of NOX_CTOKENS) {
-+        const load = loadsRef.current[t.address];
-+        if (!load || load.status !== 'ok' || load.zero) continue;
-+        const key = cacheKey(ownerAddress, load.handle);
-+        const change = changes[key];
-+        if (change && typeof change.newValue === 'string') {
-+          try {
-+            const v = BigInt(change.newValue);
-+            hotCache.set(key, v);
-+            setReveals((prev) => ({ ...prev, [t.address]: { status: 'ok', value: v } }));
-+          } catch { /* noop */ }
-+        }
-+      }
-+    };
-+    chromeStorage.onChanged.addListener(onChange);
-+    return () => chromeStorage.onChanged?.removeListener(onChange);
-+  }, [ownerAddress]);
-+
-   const revealToken = useCallback(
-     async (tokenAddress: string) => {
-       if (!ownerAddress) return;
-@@ -830,16 +1039,16 @@ export default function PrivateBalanceTab() {
-       }
- 
-       setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'signing' } }));
-+      // Mark intent BEFORE invoking noxDecrypt: if the side panel dies on
-+      // the EIP-712 popup, the freshly-mounted panel will see this marker
-+      // and show 'fetching' (spinner) instead of jumping back to 'hidden'.
-+      await markPendingDecrypt(key);
-       try {
--        console.log('[nox] revealToken start', { tokenAddress, handle: load.handle });
--        // De-dupe concurrent reveals. Persist to session storage INSIDE the
--        // promise chain so the value is available even if our setReveals call
--        // happens on an unmounted side panel.
-         let pending = inflightDecrypts.get(key);
-         if (!pending) {
-           pending = noxDecrypt(ownerAddress, load.handle).then(async (v) => {
--            console.log('[nox] decrypt resolved, saving to session', { key, value: v.toString() });
-             await saveCachedValue(key, v);
-+            await clearPendingDecrypt(key);
-             return v;
-           }).finally(() => {
-             inflightDecrypts.delete(key);
-@@ -849,9 +1058,7 @@ export default function PrivateBalanceTab() {
-         const value = await pending;
-         setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value } }));
-       } catch (err) {
--        console.error('[nox] revealToken failed', err);
--        // Also persist the error so if the side panel remounts, we can show
--        // the user what went wrong instead of silently reverting to ********.
-+        await clearPendingDecrypt(key);
-         const storage = getSessionStorage();
-         if (storage) {
-           try { await storage.set({ [`${key}:error`]: (err as Error).message }); } catch { /* noop */ }
-@@ -882,7 +1089,39 @@ export default function PrivateBalanceTab() {
-   }, [loads, revealToken]);
- 
-   return (
--    <Box padding={4}>
-+    <Box padding={4} style={{ overflowX: 'hidden', maxWidth: '100%' }}>
-+      {shieldExec.status !== 'idle' && (
-+        <Box
-+          padding={3}
-+          marginBottom={3}
-+          borderRadius={BorderRadius.LG}
-+          borderColor={BorderColor.borderMuted}
-+          display={Display.Flex}
-+          flexDirection={FlexDirection.Column}
-+          gap={1}
-+        >
-+          <Text variant={TextVariant.bodySmMedium}>
-+            {shieldExec.status === 'busy' && 'Shielding…'}
-+            {shieldExec.status === 'done' && 'Shield complete'}
-+            {shieldExec.status === 'error' && 'Shield failed'}
-+          </Text>
-+          <Text
-+            variant={TextVariant.bodyXs}
-+            color={
-+              shieldExec.status === 'error'
-+                ? TextColor.errorDefault
-+                : shieldExec.status === 'done'
-+                  ? TextColor.successDefault
-+                  : TextColor.textAlternative
-+            }
-+          >
-+            {shieldExec.status === 'busy' && shieldExec.label}
-+            {shieldExec.status === 'done' && shieldExec.message}
-+            {shieldExec.status === 'error' && shieldExec.message}
-+          </Text>
-+        </Box>
-+      )}
-+
-       <Box
-         display={Display.Flex}
-         justifyContent={JustifyContent.spaceBetween}
-@@ -932,6 +1171,10 @@ export default function PrivateBalanceTab() {
-         });
-         const held = NOX_CTOKENS.filter((t) => {
-           const l = loads[t.address];
-+          // Always render the auto-open target so the Shield form has somewhere
-+          // to land — even if the user has no cToken balance yet (typical for
-+          // a first wrap).
-+          if (autoOpen?.tokenAddress === t.address) return true;
-           return l?.status === 'ok' && !l.zero;
-         });
- 
-@@ -983,6 +1226,10 @@ export default function PrivateBalanceTab() {
-             networkClientId={networkClientId}
-             load={loads[token.address] ?? { status: 'idle' }}
-             reveal={reveals[token.address] ?? { status: 'hidden' }}
-+            autoOpenAction={
-+              autoOpen?.tokenAddress === token.address ? autoOpen.action : null
-+            }
-+            onAutoOpenConsumed={() => setAutoOpen(null)}
-             onReveal={() => void revealToken(token.address)}
-             onHide={() => hideToken(token.address)}
-             onBalanceChanged={() => setRefetchTick((n) => n + 1)}
-@@ -990,8 +1237,6 @@ export default function PrivateBalanceTab() {
-         ));
-       })()}
- 
--      <ActivitySection activity={activity} />
--
-       <Box marginTop={4}>
-         <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
-           Auto-discovered by scanning {NOX_CTOKENS.length} known ERC-7984
-diff --git a/ui/helpers/constants/routes.ts b/ui/helpers/constants/routes.ts
-index 75410d8..20a9d46 100644
---- a/ui/helpers/constants/routes.ts
-+++ b/ui/helpers/constants/routes.ts
-@@ -104,6 +104,7 @@ export const NEW_ACCOUNT_ROUTE = '/new-account';
- export const CONFIRM_ADD_SUGGESTED_NFT_ROUTE = '/confirm-add-suggested-nft';
- export const CONNECT_HARDWARE_ROUTE = '/new-account/connect';
- export const SEND_ROUTE = '/send';
-+export const SHIELD_ROUTE = '/shield';
- export const REMOTE_ROUTE = '/remote';
- export const REMOTE_ROUTE_SETUP_SWAPS = '/remote/setup-swaps';
- export const REMOTE_ROUTE_SETUP_DAILY_ALLOWANCE =
-diff --git a/ui/pages/asset/components/token-buttons.tsx b/ui/pages/asset/components/token-buttons.tsx
-index 4e4afb5..bc113a5 100644
---- a/ui/pages/asset/components/token-buttons.tsx
-+++ b/ui/pages/asset/components/token-buttons.tsx
-@@ -32,6 +32,8 @@ import { getIsNativeTokenBuyable } from '../../../ducks/ramps';
- import { Asset } from '../types/asset';
- import { navigateToSendRoute } from '../../confirmations/utils/send';
- import { isEvmChainId } from '../../../../shared/lib/asset-utils';
-+import { hasConfidentialWrapper } from '../../../components/app/assets/private-balance-tab/nox-tokens';
-+import { SHIELD_ROUTE } from '../../../helpers/constants/routes';
- 
- const TokenButtons = ({
-   token,
-@@ -124,6 +126,28 @@ const TokenButtons = ({
-     openBridgeExperience(MetaMetricsSwapsEventSource.TokenView, token);
-   }, [token, openBridgeExperience]);
- 
-+  // Shield button: only visible when this ERC-20 has a registered confidential
-+  // wrapper (e.g. USDC -> cUSDC). Click navigates to a dedicated full-screen
-+  // Shield page where the user enters an amount and approves+wraps in two
-+  // steps. Page reads ?asset=<underlying>&chainId=<hex> from the URL.
-+  const tokenChainIdNum = (() => {
-+    try {
-+      return parseInt(token.chainId.toString().replace(/^0x/, ''), 16);
-+    } catch {
-+      return undefined;
-+    }
-+  })();
-+  const canShield =
-+    !token.isERC721 && hasConfidentialWrapper(token.address, tokenChainIdNum);
-+
-+  const handleShieldOnClick = useCallback(() => {
-+    const qs = new URLSearchParams({
-+      asset: token.address,
-+      chainId: token.chainId,
-+    });
-+    navigate(`${SHIELD_ROUTE}?${qs.toString()}`);
-+  }, [navigate, token.address, token.chainId]);
-+
-   return (
-     <Box
-       display={Display.Flex}
-@@ -179,6 +203,22 @@ const TokenButtons = ({
-         label={t('swap')}
-         disabled={!isExternalServicesEnabled || isMarketClosed}
-       />
-+
-+      {canShield && (
-+        <IconButton
-+          className="token-overview__button"
-+          Icon={
-+            <Icon
-+              name={IconName.ShieldLock}
-+              color={IconColor.iconAlternative}
-+              size={IconSize.Md}
-+            />
-+          }
-+          onClick={handleShieldOnClick}
-+          data-testid="token-overview-shield"
-+          label="Shield"
-+        />
-+      )}
-     </Box>
-   );
- };
-diff --git a/ui/pages/routes/routes.component.tsx b/ui/pages/routes/routes.component.tsx
-index 871b406..9335773 100644
---- a/ui/pages/routes/routes.component.tsx
-+++ b/ui/pages/routes/routes.component.tsx
-@@ -29,6 +29,7 @@ import {
-   RESTORE_VAULT_ROUTE,
-   REVEAL_SEED_ROUTE,
-   SEND_ROUTE,
-+  SHIELD_ROUTE,
-   LEGACY_SETTINGS_V2_ROUTE,
-   SETTINGS_ROUTE,
-   UNLOCK_ROUTE,
-@@ -163,6 +164,7 @@ const ConfirmDecryptMessage = mmLazy(
- );
- const Confirm = mmLazy(() => import('../confirmations/confirm/confirm.tsx'));
- const SendPage = mmLazy(() => import('../confirmations/send/index.ts'));
-+const ShieldPage = mmLazy(() => import('../shield/index.ts'));
- const CrossChainSwap = mmLazy(() => import('../bridge/index.tsx'));
- const PermissionsConnect = mmLazy(
-   () => import('../permissions-connect/index.js'),
-@@ -311,6 +313,10 @@ export const routeConfig = [
-         path: `${SEND_ROUTE}/:page?`,
-         element: <SendPage />,
-       },
-+      {
-+        path: SHIELD_ROUTE,
-+        element: <ShieldPage />,
-+      },
-       {
-         path: `${CONFIRM_TRANSACTION_ROUTE}/:id?${DECRYPT_MESSAGE_REQUEST_PATH}`,
-         element: <ConfirmDecryptMessage />,
-diff --git a/ui/pages/shield/index.ts b/ui/pages/shield/index.ts
-new file mode 100644
-index 0000000..4dd1304
---- /dev/null
-+++ b/ui/pages/shield/index.ts
-@@ -0,0 +1 @@
-+export { default } from './shield';
-diff --git a/ui/pages/shield/shield.tsx b/ui/pages/shield/shield.tsx
-new file mode 100644
-index 0000000..19b2d6c
---- /dev/null
-+++ b/ui/pages/shield/shield.tsx
-@@ -0,0 +1,376 @@
-+// Full-screen Shield page: lets the user wrap a public ERC-20 (e.g. USDC)
-+// into its confidential ERC-7984 wrapper (e.g. cUSDC). Reached from the
-+// Shield IconButton on the asset detail page.
-+//
-+// Structure mirrors the Send page (sticky header, centered token icon,
-+// amount input with Max, Continue button at the bottom).
-+
-+import React, { useCallback, useEffect, useMemo, useState } from 'react';
-+import { useSelector } from 'react-redux';
-+import { useNavigate, useSearchParams } from 'react-router-dom';
-+import {
-+  AlignItems,
-+  BackgroundColor,
-+  BlockSize,
-+  BorderColor,
-+  BorderRadius,
-+  Display,
-+  FlexDirection,
-+  IconColor,
-+  JustifyContent,
-+  TextColor,
-+  TextVariant,
-+} from '../../helpers/constants/design-system';
-+import {
-+  Box,
-+  Button,
-+  ButtonSize,
-+  ButtonVariant,
-+  Icon,
-+  IconName,
-+  IconSize,
-+  Text,
-+} from '../../components/component-library';
-+import { getSelectedAddress } from '../../selectors';
-+import {
-+  findWrapperByUnderlying,
-+  PENDING_SHIELD_KEY,
-+  type PendingShieldIntent,
-+} from '../../components/app/assets/private-balance-tab/nox-tokens';
-+import { setDefaultHomeActiveTabName } from '../../store/actions';
-+import { AccountOverviewTabKey } from '../../../shared/constants/app-state';
-+
-+const ARB_SEPOLIA_RPC = 'https://sepolia-rollup.arbitrum.io/rpc';
-+
-+async function rpcCall<T = unknown>(method: string, params: unknown[]): Promise<T> {
-+  const res = await fetch(ARB_SEPOLIA_RPC, {
-+    method: 'POST',
-+    headers: { 'content-type': 'application/json' },
-+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-+  });
-+  const json = (await res.json()) as { result?: T; error?: { message: string } };
-+  if (json.error) throw new Error(json.error.message);
-+  return json.result as T;
-+}
-+
-+const BALANCE_OF_SELECTOR = '0x70a08231';
-+function encodeBalanceOf(owner: string): string {
-+  return BALANCE_OF_SELECTOR + owner.replace(/^0x/, '').padStart(64, '0');
-+}
-+
-+async function fetchErc20Balance(token: string, owner: string): Promise<bigint> {
-+  const data = encodeBalanceOf(owner);
-+  const hex = await rpcCall<string>('eth_call', [{ to: token, data }, 'latest']);
-+  if (!hex || hex === '0x') return 0n;
-+  return BigInt(hex);
-+}
++type RevealState =
++  | { status: 'hidden' }
++  | { status: 'signing' }
++  | { status: 'fetching' }
++  | { status: 'ok'; value: bigint }
++  | { status: 'error'; message: string };
 +
 +function formatAmount(v: bigint, decimals: number): string {
 +  if (v === 0n) return '0';
@@ -1118,6 +817,11 @@ index 0000000..19b2d6c
 +  return `${whole}.${fracStr}`;
 +}
 +
++function shortHandle(h: string): string {
++  if (h.length < 18) return h;
++  return `${h.slice(0, 10)}…${h.slice(-8)}`;
++}
++
 +function parseDecimalToRaw(input: string, decimals: number): bigint | null {
 +  if (!/^\d+(\.\d+)?$/.test(input.trim())) return null;
 +  const [whole, frac = ''] = input.trim().split('.');
@@ -1126,294 +830,909 @@ index 0000000..19b2d6c
 +  return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(padded || '0');
 +}
 +
-+type FlowState =
++type Action = 'send' | 'shield' | 'unwrap' | 'viewers';
++
++type FlowStatus =
 +  | { status: 'idle' }
 +  | { status: 'busy'; label: string }
 +  | { status: 'done'; message: string }
 +  | { status: 'error'; message: string };
 +
-+export default function ShieldPage() {
-+  const navigate = useNavigate();
-+  const [searchParams] = useSearchParams();
-+  const ownerAddress = useSelector(getSelectedAddress) as string | undefined;
++// USDC brand blue — displayed when the underlying is Circle's USDC
++const USDC_BLUE = '#2775CA';
 +
-+  const assetParam = searchParams.get('asset')?.toLowerCase() ?? '';
-+  const chainIdParam = searchParams.get('chainId') ?? '';
-+
-+  const wrapper = useMemo(() => {
-+    if (!assetParam || !chainIdParam) return undefined;
-+    const chainIdNum = parseInt(chainIdParam.replace(/^0x/, ''), 16);
-+    return findWrapperByUnderlying(assetParam, chainIdNum);
-+  }, [assetParam, chainIdParam]);
-+
-+  const [amount, setAmount] = useState('');
-+  const [flow, setFlow] = useState<FlowState>({ status: 'idle' });
-+  const [balance, setBalance] = useState<bigint | null>(null);
-+
-+  // Fetch underlying balance for "X available" + Max button.
-+  useEffect(() => {
-+    if (!wrapper || !ownerAddress) return;
-+    let cancelled = false;
-+    fetchErc20Balance(wrapper.underlying, ownerAddress)
-+      .then((v) => { if (!cancelled) setBalance(v); })
-+      .catch(() => { if (!cancelled) setBalance(0n); });
-+    return () => { cancelled = true; };
-+  }, [wrapper, ownerAddress]);
-+
-+  const onMax = useCallback(() => {
-+    if (!wrapper || balance === null) return;
-+    setAmount(formatAmount(balance, wrapper.decimals));
-+  }, [balance, wrapper]);
-+
-+  const onContinue = useCallback(async () => {
-+    if (!wrapper || !ownerAddress) return;
-+    const raw = parseDecimalToRaw(amount, wrapper.decimals);
-+    if (raw === null || raw === 0n) {
-+      setFlow({ status: 'error', message: 'Invalid amount' });
-+      return;
-+    }
-+    if (balance !== null && raw > balance) {
-+      setFlow({ status: 'error', message: 'Amount exceeds your balance' });
-+      return;
-+    }
-+
-+    // ARCHITECTURE NOTE — why we don't fire txs from here:
-+    //
-+    // MetaMask's TransactionController, after the user confirms a popup
-+    // initiated by addTransaction(...) with origin: ORIGIN_METAMASK,
-+    // navigates the wallet UI back to '/'. That unmounts /shield, killing
-+    // any in-flight await for the second tx. Two failure modes we hit:
-+    //   (1) Sequential awaits: step 2 (wrap) never runs after step 1
-+    //       (approve) because the page is gone before the next await
-+    //       resumes.
-+    //   (2) Parallel addTransactionAndWaitForPublish: both txs share the
-+    //       same gas estimation snapshot taken at submit time. Arbitrum
-+    //       Sepolia's base fee jiggles by ~10-30k wei during the user's
-+    //       signing window, and MetaMask's tight maxFeePerGas (only ~2k
-+    //       wei above baseFee) gets rejected by the public RPC with
-+    //       "max fee per gas less than block base fee".
-+    //
-+    // Fix: this page is now UI-only. We persist a PendingShieldIntent and
-+    // navigate to home → cTokens tab. The cTokens tab is rendered inside
-+    // the home route, which is exactly where MetaMask redirects after a
-+    // popup confirmation, so it doesn't unmount during the 2-step flow.
-+    // It picks up the intent on mount and runs the proven sequential
-+    // approve→await→wrap→await flow that already works for the inline
-+    // shield form on cTokens cards.
-+
-+    const intent: PendingShieldIntent = {
-+      underlying: wrapper.underlying,
-+      wrapper: wrapper.address,
-+      chainId: wrapper.chainId,
-+      amountRaw: raw.toString(),
-+      ts: Date.now(),
-+    };
-+
-+    try {
-+      const chromeRef = (
-+        globalThis as { chrome?: { storage?: { session?: { set: (i: Record<string, unknown>) => Promise<void> } } } }
-+      ).chrome;
-+      const session = chromeRef?.storage?.session;
-+      if (session) {
-+        await session.set({ [PENDING_SHIELD_KEY]: intent });
-+        console.log('[nox] /shield wrote pendingShield intent', intent);
-+      } else {
-+        console.warn('[nox] /shield: chrome.storage.session not available');
-+      }
-+    } catch (err) {
-+      console.error('[nox] /shield: failed to write intent', err);
-+    }
-+
-+    // Pre-select the cTokens tab so the user lands there. The Redux-backed
-+    // setDefaultHomeActiveTabName is async and may not be visible to the
-+    // home renderer in time, so we ALSO push ?tab=private-balance into the
-+    // URL — useTabState reads the URL first.
-+    void setDefaultHomeActiveTabName(AccountOverviewTabKey.PrivateBalance);
-+    navigate(`/?tab=${AccountOverviewTabKey.PrivateBalance}`);
-+  }, [amount, balance, wrapper, ownerAddress, navigate]);
-+
-+  if (!wrapper) {
-+    return (
-+      <Box padding={4}>
-+        <Text variant={TextVariant.bodyMd} color={TextColor.errorDefault}>
-+          No confidential wrapper is registered for this token.
-+        </Text>
-+      </Box>
-+    );
-+  }
-+
-+  const busy = flow.status === 'busy';
-+  const done = flow.status === 'done';
-+  const letter =
-+    wrapper.underlyingSymbol.charAt(0).toUpperCase() || '?';
-+
++function USDCGlyph() {
++  // Simplified USDC "$" mark, inspired by Circle's brand. Inline SVG keeps
++  // the bundle small and stays in the SES sandbox (no remote fetch).
 +  return (
-+    <Box
-+      backgroundColor={BackgroundColor.backgroundDefault}
-+      display={Display.Flex}
-+      flexDirection={FlexDirection.Column}
-+      height={BlockSize.Full}
-+      width={BlockSize.Full}
-+      style={{ minHeight: '100vh' }}
-+    >
-+      {/* Header */}
-+      <Box
-+        display={Display.Flex}
-+        alignItems={AlignItems.center}
-+        justifyContent={JustifyContent.spaceBetween}
-+        padding={4}
-+      >
-+        <button
-+          type="button"
-+          onClick={() => navigate(-1)}
-+          aria-label="Back"
-+          style={{
-+            background: 'transparent',
-+            border: 'none',
-+            padding: 4,
-+            cursor: 'pointer',
-+            color: 'var(--color-icon-default)',
-+            display: 'flex',
-+            alignItems: 'center',
-+          }}
-+        >
-+          <Icon name={IconName.ArrowLeft} size={IconSize.Md} color={IconColor.iconDefault} />
-+        </button>
-+        <Text variant={TextVariant.headingSm}>Shield</Text>
-+        {/* Spacer to balance the back button on the left so the title stays centered */}
-+        <Box style={{ width: 28 }} />
-+      </Box>
++    <svg width="22" height="22" viewBox="0 0 36 36" fill="none">
++      <path
++        d="M18 6.5c.6 0 1 .4 1 1v.9a5 5 0 0 1 4.2 4.7c0 .5-.4 1-1 1h-.7c-.5 0-.9-.3-1-.8-.3-1.3-1.4-2.2-2.8-2.2-1.7 0-3 1-3 2.4 0 1 .6 1.9 2 2.4l2.5.8c3 1 4.3 2.4 4.3 4.7 0 2.5-1.8 4.5-4.5 5v.9c0 .6-.4 1-1 1s-1-.4-1-1v-.9a5 5 0 0 1-4.3-4.7c0-.5.4-1 1-1h.7c.5 0 .9.3 1 .8.3 1.3 1.4 2.2 2.9 2.2 1.9 0 3.2-1 3.2-2.5 0-1.1-.7-1.9-2.3-2.5l-2.4-.8c-2.9-1-4.2-2.4-4.2-4.6 0-2.4 1.8-4.3 4.4-4.8V7.5c0-.6.4-1 1-1Z"
++        fill="#fff"
++      />
++    </svg>
++  );
++}
 +
-+      {/* Token icon + symbol */}
++function TokenLogo({ symbol }: { symbol: string; underlyingSymbol?: string }) {
++  // Simplified: plain circle with the first letter. Previous version had an
++  // inline SVG glyph + a positioned lock badge which was crashing on render
++  // inside some React flows — reverted to the stable original.
++  const letter = symbol.replace(/^c/i, '').charAt(0).toUpperCase() || '?';
++  return (
++    <div
++      style={{
++        width: 32,
++        height: 32,
++        borderRadius: '50%',
++        display: 'flex',
++        alignItems: 'center',
++        justifyContent: 'center',
++        background: USDC_BLUE,
++        color: 'white',
++        fontSize: 14,
++        fontWeight: 600,
++      }}
++    >
++      {letter}
++    </div>
++  );
++}
++
++function ActivitySection({ activity }: { activity: TransferEvent[] | 'loading' | null }) {
++  if (activity === null) return null;
++  return (
++    <Box marginTop={4}>
 +      <Box
 +        display={Display.Flex}
-+        flexDirection={FlexDirection.Column}
 +        alignItems={AlignItems.center}
 +        gap={2}
-+        marginTop={4}
-+        marginBottom={6}
++        marginBottom={2}
 +      >
-+        <Box
-+          display={Display.Flex}
-+          alignItems={AlignItems.center}
-+          justifyContent={JustifyContent.center}
-+          borderRadius={BorderRadius.full}
-+          style={{
-+            width: 56,
-+            height: 56,
-+            background: '#2775CA',
-+            color: 'white',
-+            fontSize: 22,
-+            fontWeight: 600,
-+          }}
-+        >
-+          {letter}
-+        </Box>
-+        <Text variant={TextVariant.headingMd}>{wrapper.underlyingSymbol}</Text>
++        <Text variant={TextVariant.bodyMdMedium}>Recent activity</Text>
 +        <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
-+          → {wrapper.symbol} · {wrapper.network}
++          · confidential transfers
 +        </Text>
 +      </Box>
 +
-+      {/* Amount input */}
-+      <Box paddingLeft={4} paddingRight={4} display={Display.Flex} flexDirection={FlexDirection.Column} gap={2}>
-+        <Text variant={TextVariant.bodyMdMedium}>Amount</Text>
-+        <Box
-+          display={Display.Flex}
-+          alignItems={AlignItems.center}
-+          borderColor={BorderColor.borderMuted}
-+          borderRadius={BorderRadius.LG}
-+          paddingLeft={3}
-+          paddingRight={3}
-+          style={{ height: 48 }}
-+        >
-+          <input
-+            type="text"
-+            inputMode="decimal"
-+            placeholder="0"
-+            value={amount}
-+            onChange={(e) => setAmount(e.target.value)}
-+            disabled={busy || done}
-+            style={{
-+              flex: 1,
-+              background: 'transparent',
-+              border: 'none',
-+              outline: 'none',
-+              color: 'inherit',
-+              fontSize: 18,
-+              fontWeight: 500,
-+            }}
-+          />
-+          <Text as="span" variant={TextVariant.bodyMdMedium} color={TextColor.textAlternative}>
-+            {wrapper.underlyingSymbol}
-+          </Text>
-+        </Box>
++      {activity === 'loading' && (
++        <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++          Scanning logs…
++        </Text>
++      )}
 +
-+        <Box
-+          display={Display.Flex}
-+          justifyContent={JustifyContent.spaceBetween}
-+          alignItems={AlignItems.center}
++      {Array.isArray(activity) && activity.length === 0 && (
++        <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++          No recent transfers.
++        </Text>
++      )}
++
++      {Array.isArray(activity) && activity.length > 0 && (
++        <div
++          style={{
++            border: '1px solid var(--color-border-muted)',
++            borderRadius: 8,
++            overflow: 'hidden',
++          }}
 +        >
-+          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
-+            {balance === null
-+              ? 'Loading balance…'
-+              : `${formatAmount(balance, wrapper.decimals)} ${wrapper.underlyingSymbol} available`}
-+          </Text>
-+          <button
-+            type="button"
-+            onClick={onMax}
-+            disabled={balance === null || busy || done}
-+            style={{
-+              background: 'transparent',
-+              border: 'none',
-+              color: 'var(--color-primary-default)',
-+              cursor: balance === null ? 'default' : 'pointer',
-+              fontSize: 12,
-+              fontWeight: 600,
-+              padding: '4px 8px',
-+            }}
-+          >
-+            Max
-+          </button>
-+        </Box>
++          {activity.map((ev, i) => {
++            const tokenMeta = NOX_CTOKENS.find(
++              (t) => t.address.toLowerCase() === ev.token.toLowerCase(),
++            );
++            const counterparty = ev.direction === 'out' ? ev.to : ev.from;
++            const label = ev.direction === 'out' ? 'Sent' : 'Received';
++            const prep = ev.direction === 'out' ? 'to' : 'from';
++            const arrow =
++              ev.direction === 'out' ? IconName.Arrow2UpRight : IconName.Arrow2Down;
++            const arrowColor =
++              ev.direction === 'out' ? IconColor.errorDefault : IconColor.successDefault;
++            return (
++              <a
++                key={`${ev.txHash}:${ev.direction}:${i}`}
++                href={`https://sepolia.arbiscan.io/tx/${ev.txHash}`}
++                target="_blank"
++                rel="noopener noreferrer"
++                style={{
++                  display: 'flex',
++                  alignItems: 'center',
++                  gap: 10,
++                  padding: '10px 12px',
++                  borderBottom:
++                    i === activity.length - 1
++                      ? 'none'
++                      : '1px solid var(--color-border-muted)',
++                  color: 'inherit',
++                  textDecoration: 'none',
++                }}
++              >
++                <Icon name={arrow} size={IconSize.Sm} color={arrowColor} />
++                <div style={{ flex: 1, minWidth: 0 }}>
++                  <div style={{ fontSize: 13, fontWeight: 500 }}>
++                    {label} {tokenMeta?.symbol ?? 'cToken'} {prep}{' '}
++                    <span style={{ fontFamily: 'monospace', color: 'var(--color-text-alternative)' }}>
++                      {counterparty.slice(0, 6)}…{counterparty.slice(-4)}
++                    </span>
++                  </div>
++                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
++                    block #{String(ev.blockNumber)} · encrypted amount
++                  </div>
++                </div>
++                <Icon name={IconName.Export} size={IconSize.Xs} color={IconColor.iconMuted} />
++              </a>
++            );
++          })}
++        </div>
++      )}
++    </Box>
++  );
++}
++
++const inputStyle: React.CSSProperties = {
++  width: '100%', padding: '7px 9px', fontSize: 12,
++  background: 'transparent', color: 'inherit',
++  border: '1px solid var(--color-border-muted)', borderRadius: 6,
++  boxSizing: 'border-box',
++};
++
++const ACTION_META: Record<Action, { title: string; icon: IconName; fields: ('recipient' | 'amount' | 'viewer')[] }> = {
++  send:    { title: 'Confidential send',       icon: IconName.Arrow2UpRight, fields: ['recipient', 'amount'] },
++  shield:  { title: 'Shield (wrap)',            icon: IconName.ShieldLock,    fields: ['amount'] },
++  unwrap:  { title: 'Unwrap (2-step)',          icon: IconName.Export,        fields: ['amount'] },
++  viewers: { title: 'Grant viewer access',      icon: IconName.Eye,           fields: ['viewer'] },
++};
++
++function ActionForm({
++  action, token, flow, recipient, setRecipient, amount, setAmount,
++  viewerAddr, setViewerAddr, onConfirm, onClose,
++}: {
++  action: Action;
++  token: (typeof NOX_CTOKENS)[number];
++  flow: FlowStatus;
++  recipient: string; setRecipient: (v: string) => void;
++  amount: string; setAmount: (v: string) => void;
++  viewerAddr: string; setViewerAddr: (v: string) => void;
++  onConfirm: () => void; onClose: () => void;
++}) {
++  const meta = ACTION_META[action];
++  const busy = flow.status === 'busy';
++  const done = flow.status === 'done';
++  return (
++    <Box
++      marginTop={2}
++      padding={3}
++      backgroundColor={BackgroundColor.backgroundAlternative}
++      borderRadius={BorderRadius.MD}
++      display={Display.Flex}
++      flexDirection={FlexDirection.Column}
++      gap={2}
++    >
++      <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
++        <Icon name={meta.icon} size={IconSize.Sm} color={TextColor.iconAlternative} />
++        <Text variant={TextVariant.bodySmMedium}>{meta.title}</Text>
 +      </Box>
 +
-+      {/* Status / Errors */}
-+      {flow.status === 'busy' && (
-+        <Box marginTop={4} paddingLeft={4} paddingRight={4}>
-+          <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
-+            {flow.label}
-+          </Text>
-+        </Box>
++      {meta.fields.includes('recipient') && (
++        <>
++          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>Recipient</Text>
++          <input style={{ ...inputStyle, fontFamily: 'monospace' }} value={recipient}
++            onChange={(e) => setRecipient(e.target.value)} placeholder="0x…" disabled={busy || done} />
++        </>
 +      )}
-+      {flow.status === 'error' && (
-+        <Box marginTop={4} paddingLeft={4} paddingRight={4}>
-+          <Text variant={TextVariant.bodySm} color={TextColor.errorDefault}>
-+            {flow.message}
++      {meta.fields.includes('amount') && (
++        <>
++          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
++            Amount ({action === 'shield' ? token.underlyingSymbol : token.symbol})
 +          </Text>
-+        </Box>
++          <input style={inputStyle} value={amount}
++            onChange={(e) => setAmount(e.target.value)} placeholder="0.50" disabled={busy || done} />
++        </>
 +      )}
-+      {flow.status === 'done' && (
-+        <Box marginTop={4} paddingLeft={4} paddingRight={4}>
-+          <Text variant={TextVariant.bodySm} color={TextColor.successDefault}>
-+            {flow.message}
++      {meta.fields.includes('viewer') && (
++        <>
++          <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
++            Viewer address (they'll be able to decrypt your current balance)
 +          </Text>
-+        </Box>
++          <input style={{ ...inputStyle, fontFamily: 'monospace' }} value={viewerAddr}
++            onChange={(e) => setViewerAddr(e.target.value)} placeholder="0x…" disabled={busy || done} />
++        </>
 +      )}
 +
-+      {/* Continue button — pinned at the bottom */}
-+      <Box style={{ flex: 1 }} />
-+      <Box padding={4}>
-+        <Button
-+          variant={ButtonVariant.Primary}
-+          size={ButtonSize.Lg}
-+          block
-+          disabled={busy || done || balance === null || !amount}
-+          onClick={onContinue}
-+        >
-+          {busy ? 'Working…' : done ? 'Done' : 'Continue'}
++      {flow.status === 'busy' && (
++        <Text variant={TextVariant.bodyXs} color={TextColor.textAlternative}>{flow.label}</Text>
++      )}
++      {flow.status === 'done' && (
++        <Text variant={TextVariant.bodyXs} color={TextColor.successDefault}>✓ {flow.message}</Text>
++      )}
++      {flow.status === 'error' && (
++        <Text variant={TextVariant.bodyXs} color={TextColor.errorDefault}>{flow.message}</Text>
++      )}
++
++      <Box display={Display.Flex} gap={2}>
++        {!done && (
++          <Button variant={ButtonVariant.Primary} size={ButtonSize.Sm}
++            onClick={onConfirm} disabled={busy}>
++            Confirm
++          </Button>
++        )}
++        <Button variant={ButtonVariant.Secondary} size={ButtonSize.Sm}
++          onClick={onClose} disabled={busy}>
++          {done ? 'Close' : 'Cancel'}
 +        </Button>
 +      </Box>
 +    </Box>
 +  );
++}
++
++function CTokenCard({
++  token,
++  ownerAddress,
++  networkClientId,
++  load,
++  reveal,
++  onReveal,
++  onHide,
++  onBalanceChanged,
++}: {
++  token: (typeof NOX_CTOKENS)[number];
++  ownerAddress: string;
++  networkClientId: string;
++  load: LoadState;
++  reveal: RevealState;
++  onReveal: () => void;
++  onHide: () => void;
++  onBalanceChanged: () => void;
++}) {
++  const [action, setAction] = useState<Action | null>(null);
++  const [flow, setFlow] = useState<FlowStatus>({ status: 'idle' });
++  // Form inputs (shared, reset when opening/closing a form)
++  const [recipient, setRecipient] = useState('');
++  const [amount, setAmount] = useState('');
++  const [viewerAddr, setViewerAddr] = useState('');
++
++  const chainIdHex = `0x${token.chainId.toString(16)}` as `0x${string}`;
++
++  const openAction = useCallback((a: Action) => {
++    setRecipient('');
++    setAmount('');
++    setViewerAddr('');
++    setFlow({ status: 'idle' });
++    setAction(a);
++  }, []);
++
++  const closeAction = useCallback(() => {
++    setAction(null);
++    setFlow({ status: 'idle' });
++  }, []);
++
++  const dispatchTx = useCallback(
++    async (to: string, data: `0x${string}`, type: TransactionType) => {
++      const txMeta = await addTransaction(
++        {
++          from: ownerAddress as `0x${string}`,
++          to: to as `0x${string}`,
++          data,
++          value: '0x0',
++          chainId: chainIdHex,
++        } as Parameters<typeof addTransaction>[0],
++        { networkClientId, type },
++      );
++      return txMeta.hash as string;
++    },
++    [ownerAddress, chainIdHex, networkClientId],
++  );
++
++  const submitSend = useCallback(async () => {
++    if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
++      setFlow({ status: 'error', message: 'Invalid recipient address' });
++      return;
++    }
++    const raw = parseDecimalToRaw(amount, token.decimals);
++    if (raw === null || raw === 0n) {
++      setFlow({ status: 'error', message: 'Invalid amount' });
++      return;
++    }
++    try {
++      setFlow({ status: 'busy', label: 'Encrypting amount…' });
++      const { handle, proof } = await encryptUint256(token.address, ownerAddress, raw);
++      setFlow({ status: 'busy', label: 'Awaiting MetaMask confirmation…' });
++      const data = encodeConfidentialTransfer(recipient, handle, proof);
++      const hash = await dispatchTx(token.address, data, TransactionType.contractInteraction);
++      setFlow({ status: 'busy', label: 'Waiting for tx to mine…' });
++      await waitReceipt(hash);
++      setFlow({ status: 'done', message: `Sent. Tx ${hash.slice(0, 10)}…` });
++      onBalanceChanged();
++    } catch (err) {
++      setFlow({ status: 'error', message: (err as Error).message });
++    }
++  }, [recipient, amount, token.address, token.decimals, ownerAddress, dispatchTx, onBalanceChanged]);
++
++  const submitShield = useCallback(async () => {
++    const raw = parseDecimalToRaw(amount, token.decimals);
++    if (raw === null || raw === 0n) {
++      setFlow({ status: 'error', message: `Enter an ${token.underlyingSymbol} amount` });
++      return;
++    }
++    try {
++      // Step 1 — approve underlying
++      setFlow({ status: 'busy', label: '1/2 Approving ERC-20 — sign in MetaMask…' });
++      const approveData = encodeApprove(token.address, raw);
++      const approveHash = await dispatchTx(
++        token.underlying,
++        approveData,
++        TransactionType.tokenMethodApprove,
++      );
++      setFlow({ status: 'busy', label: '1/2 Waiting for approval to mine…' });
++      await waitReceipt(approveHash);
++      // Step 2 — wrap
++      setFlow({ status: 'busy', label: '2/2 Wrapping — sign in MetaMask…' });
++      const wrapData = encodeWrap(ownerAddress, raw);
++      const wrapHash = await dispatchTx(token.address, wrapData, TransactionType.contractInteraction);
++      setFlow({ status: 'busy', label: '2/2 Waiting for wrap to mine…' });
++      await waitReceipt(wrapHash);
++      setFlow({ status: 'done', message: `Shielded ${amount} ${token.underlyingSymbol}` });
++      onBalanceChanged();
++    } catch (err) {
++      setFlow({ status: 'error', message: (err as Error).message });
++    }
++  }, [amount, token, ownerAddress, dispatchTx, onBalanceChanged]);
++
++  const submitUnwrap = useCallback(async () => {
++    const raw = parseDecimalToRaw(amount, token.decimals);
++    if (raw === null || raw === 0n) {
++      setFlow({ status: 'error', message: 'Invalid amount' });
++      return;
++    }
++    try {
++      // Step 1 — encrypt amount, burn
++      setFlow({ status: 'busy', label: '1/2 Encrypting + burning — sign in MetaMask…' });
++      const { handle, proof } = await encryptUint256(token.address, ownerAddress, raw);
++      const burnData = encodeUnwrap(ownerAddress, ownerAddress, handle, proof);
++      const burnHash = await dispatchTx(token.address, burnData, TransactionType.contractInteraction);
++      setFlow({ status: 'busy', label: '1/2 Waiting for burn to mine…' });
++      const burnReceipt = await waitReceipt(burnHash);
++      const unwrapRequestId = parseUnwrapRequestIdFromLogs(burnReceipt.logs, token.address);
++      if (!unwrapRequestId) throw new Error('UnwrapRequested event not found in receipt');
++
++      // Step 2 — poll Gateway for public decryption proof, finalize
++      setFlow({ status: 'busy', label: '2/2 Fetching decryption proof (gateway lag ~3-10s)…' });
++      const { decryptionProof } = await publicDecryptProof(unwrapRequestId);
++      setFlow({ status: 'busy', label: '2/2 Finalizing — sign in MetaMask…' });
++      const finData = encodeFinalizeUnwrap(unwrapRequestId, decryptionProof);
++      const finHash = await dispatchTx(token.address, finData, TransactionType.contractInteraction);
++      setFlow({ status: 'busy', label: '2/2 Waiting for finalize to mine…' });
++      await waitReceipt(finHash);
++      setFlow({ status: 'done', message: `Unwrapped ${amount} → ${token.underlyingSymbol}` });
++      onBalanceChanged();
++    } catch (err) {
++      setFlow({ status: 'error', message: (err as Error).message });
++    }
++  }, [amount, token, ownerAddress, dispatchTx, onBalanceChanged]);
++
++  const submitViewer = useCallback(async () => {
++    if (!/^0x[0-9a-fA-F]{40}$/.test(viewerAddr)) {
++      setFlow({ status: 'error', message: 'Invalid viewer address' });
++      return;
++    }
++    if (load.status !== 'ok') {
++      setFlow({ status: 'error', message: 'Balance handle not loaded yet' });
++      return;
++    }
++    try {
++      setFlow({ status: 'busy', label: 'Granting viewer — sign in MetaMask…' });
++      const data = encodeAddViewer(load.handle, viewerAddr);
++      const hash = await dispatchTx(NOX_COMPUTE, data, TransactionType.contractInteraction);
++      setFlow({ status: 'busy', label: 'Waiting for tx to mine…' });
++      await waitReceipt(hash);
++      setFlow({ status: 'done', message: `Granted ${shortAddress(viewerAddr)}` });
++    } catch (err) {
++      setFlow({ status: 'error', message: (err as Error).message });
++    }
++  }, [viewerAddr, load, dispatchTx]);
++
++  let revealed: React.ReactNode;
++  if (load.status === 'loading') {
++    revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.textAlternative}>Loading…</Text>;
++  } else if (load.status === 'error') {
++    revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.errorDefault}>error</Text>;
++  } else if (load.status === 'ok' && load.zero) {
++    revealed = <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textAlternative}>No balance on this account</Text>;
++  } else if (reveal.status === 'signing') {
++    revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.textAlternative}>Awaiting signature…</Text>;
++  } else if (reveal.status === 'fetching') {
++    revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.textAlternative}>Decrypting…</Text>;
++  } else if (reveal.status === 'error') {
++    revealed = <Text as="span" variant={TextVariant.bodySm} color={TextColor.errorDefault}>{reveal.message}</Text>;
++  } else if (reveal.status === 'ok') {
++    revealed = (
++      <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.successDefault}>
++        {formatAmount(reveal.value, token.decimals)} {token.symbol}
++      </Text>
++    );
++  } else if (load.status === 'ok') {
++    revealed = (
++      <Text as="span" variant={TextVariant.bodySmMedium} color={TextColor.textDefault}>
++        ******** {token.symbol}
++      </Text>
++    );
++  } else {
++    revealed = <Text as="span" variant={TextVariant.bodySmMedium}>—</Text>;
++  }
++
++  const handleChip = load.status === 'ok' && !load.zero && (
++    <Text
++      as="span"
++      variant={TextVariant.bodyXs}
++      color={TextColor.textMuted}
++      style={{ fontFamily: 'monospace' }}
++    >
++      handle {shortHandle(load.handle)}
++    </Text>
++  );
++
++  const canDecrypt = load.status === 'ok' && !load.zero;
++  const isRevealing = reveal.status === 'signing' || reveal.status === 'fetching';
++  const isRevealed = reveal.status === 'ok';
++
++  return (
++    <Box
++      padding={4}
++      borderColor={BorderColor.borderMuted}
++      borderRadius={BorderRadius.LG}
++      marginBottom={2}
++      display={Display.Flex}
++      flexDirection={FlexDirection.Column}
++      gap={2}
++    >
++      <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
++        <TokenLogo symbol={token.symbol} underlyingSymbol={token.underlyingSymbol} />
++        <Box display={Display.Flex} flexDirection={FlexDirection.Column}>
++          <Text variant={TextVariant.bodyMdMedium}>
++            {token.symbol} · {token.network}
++          </Text>
++          {handleChip}
++        </Box>
++      </Box>
++
++      <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++        On-chain balance is encrypted.
++      </Text>
++
++      <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++        Revealed: {revealed}
++      </Text>
++
++      <Box display={Display.Flex} gap={2} flexWrap={undefined}>
++        <Button
++          variant={ButtonVariant.Secondary}
++          size={ButtonSize.Sm}
++          startIconName={IconName.Arrow2UpRight}
++          onClick={() => openAction('send')}
++          disabled={!canDecrypt || action !== null}
++        >
++          Send
++        </Button>
++        <Button
++          variant={ButtonVariant.Secondary}
++          size={ButtonSize.Sm}
++          startIconName={IconName.ShieldLock}
++          onClick={() => openAction('shield')}
++          disabled={action !== null}
++        >
++          Shield
++        </Button>
++        <Button
++          variant={ButtonVariant.Secondary}
++          size={ButtonSize.Sm}
++          startIconName={IconName.Export}
++          onClick={() => openAction('unwrap')}
++          disabled={!canDecrypt || action !== null}
++        >
++          Unwrap
++        </Button>
++        <Button
++          variant={ButtonVariant.Secondary}
++          size={ButtonSize.Sm}
++          startIconName={IconName.Eye}
++          onClick={() => openAction('viewers')}
++          disabled={!canDecrypt || action !== null}
++        >
++          Share
++        </Button>
++        <Button
++          variant={ButtonVariant.Link}
++          size={ButtonSize.Sm}
++          onClick={isRevealed ? onHide : onReveal}
++          disabled={!canDecrypt || isRevealing}
++        >
++          {isRevealed ? 'Hide' : isRevealing ? '…' : 'Decrypt'}
++        </Button>
++      </Box>
++
++      {action !== null && (
++        <ActionForm
++          action={action}
++          token={token}
++          flow={flow}
++          recipient={recipient}
++          setRecipient={setRecipient}
++          amount={amount}
++          setAmount={setAmount}
++          viewerAddr={viewerAddr}
++          setViewerAddr={setViewerAddr}
++          onConfirm={
++            action === 'send' ? submitSend
++            : action === 'shield' ? submitShield
++            : action === 'unwrap' ? submitUnwrap
++            : submitViewer
++          }
++          onClose={closeAction}
++        />
++      )}
++    </Box>
++  );
++}
++
++export default function PrivateBalanceTab() {
++  const ownerAddress = useSelector(getSelectedAddress) as string | undefined;
++  const networkClientId = useSelector(getSelectedNetworkClientId) as string;
++  const [loads, setLoads] = useState<Record<string, LoadState>>({});
++  const [reveals, setReveals] = useState<Record<string, RevealState>>({});
++  const [refetchTick, setRefetchTick] = useState(0);
++  const [activity, setActivity] = useState<TransferEvent[] | 'loading' | null>(null);
++
++  // TEMPORARILY DISABLED — bisecting activity crash
++  // useEffect(() => {
++  //   if (!ownerAddress) return;
++  //   let cancelled = false;
++  //   setActivity('loading');
++  //   (async () => {
++  //     try {
++  //       const events = await fetchRecentTransfers(
++  //         ownerAddress,
++  //         NOX_CTOKENS.map((t) => t.address),
++  //       );
++  //       if (!cancelled) setActivity(events);
++  //     } catch {
++  //       if (!cancelled) setActivity([]);
++  //     }
++  //   })();
++  //   return () => { cancelled = true; };
++  // }, [ownerAddress, refetchTick]);
++
++  useEffect(() => {
++    if (!ownerAddress) return;
++    let cancelled = false;
++    setLoads(() => {
++      const next: Record<string, LoadState> = {};
++      NOX_CTOKENS.forEach((t) => { next[t.address] = { status: 'loading' }; });
++      return next;
++    });
++    // Rehydrate reveal state from the module-level cache before the first
++    // fetch lands — lets us show plaintext immediately for handles we've
++    // already decrypted in this session.
++    setReveals({});
++    (async () => {
++      for (const token of NOX_CTOKENS) {
++        try {
++          const { handle, zero } = await fetchBalanceHandle(token.address, ownerAddress);
++          if (cancelled) return;
++          setLoads((prev) => ({ ...prev, [token.address]: { status: 'ok', handle, zero } }));
++          if (!zero) {
++            // Rehydrate plaintext from session storage if we decrypted this
++            // handle already (survives side-panel remount after signing).
++            const key = cacheKey(ownerAddress, handle);
++            const cached = await loadCachedValue(key);
++            console.log('[nox] rehydrate check', { key, hit: cached !== undefined });
++            if (cached !== undefined && !cancelled) {
++              setReveals((prev) => ({
++                ...prev,
++                [token.address]: { status: 'ok', value: cached },
++              }));
++            } else {
++              // Surface any persisted error from a previous failed decrypt
++              const storage = getSessionStorage();
++              if (storage) {
++                try {
++                  const out = await storage.get(`${key}:error`);
++                  const errMsg = out[`${key}:error`];
++                  if (typeof errMsg === 'string' && !cancelled) {
++                    setReveals((prev) => ({
++                      ...prev,
++                      [token.address]: { status: 'error', message: errMsg },
++                    }));
++                  }
++                } catch { /* noop */ }
++              }
++            }
++          }
++        } catch (err) {
++          if (!cancelled) {
++            setLoads((prev) => ({
++              ...prev,
++              [token.address]: { status: 'error', message: (err as Error).message },
++            }));
++          }
++        }
++      }
++    })();
++    return () => { cancelled = true; };
++  }, [ownerAddress, refetchTick]);
++
++  const revealToken = useCallback(
++    async (tokenAddress: string) => {
++      if (!ownerAddress) return;
++      const load = loads[tokenAddress];
++      if (!load || load.status !== 'ok' || load.zero) return;
++
++      const key = cacheKey(ownerAddress, load.handle);
++
++      // Fast-path: already decrypted this handle before in this session.
++      const cached = await loadCachedValue(key);
++      if (cached !== undefined) {
++        setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value: cached } }));
++        return;
++      }
++
++      setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'signing' } }));
++      try {
++        console.log('[nox] revealToken start', { tokenAddress, handle: load.handle });
++        // De-dupe concurrent reveals. Persist to session storage INSIDE the
++        // promise chain so the value is available even if our setReveals call
++        // happens on an unmounted side panel.
++        let pending = inflightDecrypts.get(key);
++        if (!pending) {
++          pending = noxDecrypt(ownerAddress, load.handle).then(async (v) => {
++            console.log('[nox] decrypt resolved, saving to session', { key, value: v.toString() });
++            await saveCachedValue(key, v);
++            return v;
++          }).finally(() => {
++            inflightDecrypts.delete(key);
++          });
++          inflightDecrypts.set(key, pending);
++        }
++        const value = await pending;
++        setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'ok', value } }));
++      } catch (err) {
++        console.error('[nox] revealToken failed', err);
++        // Also persist the error so if the side panel remounts, we can show
++        // the user what went wrong instead of silently reverting to ********.
++        const storage = getSessionStorage();
++        if (storage) {
++          try { await storage.set({ [`${key}:error`]: (err as Error).message }); } catch { /* noop */ }
++        }
++        setReveals((prev) => ({
++          ...prev,
++          [tokenAddress]: { status: 'error', message: (err as Error).message },
++        }));
++      }
++    },
++    [ownerAddress, loads],
++  );
++
++  const hideToken = useCallback(
++    (tokenAddress: string) => {
++      setReveals((prev) => ({ ...prev, [tokenAddress]: { status: 'hidden' } }));
++    },
++    [],
++  );
++
++  const decryptAll = useCallback(() => {
++    NOX_CTOKENS.forEach((t) => {
++      const load = loads[t.address];
++      if (load?.status === 'ok' && !load.zero) {
++        void revealToken(t.address);
++      }
++    });
++  }, [loads, revealToken]);
++
++  return (
++    <Box padding={4}>
++      <Box
++        display={Display.Flex}
++        justifyContent={JustifyContent.spaceBetween}
++        alignItems={AlignItems.center}
++        marginBottom={3}
++      >
++        <Box display={Display.Flex} alignItems={AlignItems.center} gap={2}>
++          <Text variant={TextVariant.bodyMdMedium}>Confidential tokens</Text>
++          {(() => {
++            const heldCount = NOX_CTOKENS.filter((t) => {
++              const l = loads[t.address];
++              return l?.status === 'ok' && !l.zero;
++            }).length;
++            return (
++              <Box
++                paddingLeft={2}
++                paddingRight={2}
++                borderRadius={BorderRadius.full}
++                backgroundColor={BackgroundColor.backgroundMuted}
++                style={{ minWidth: 22, textAlign: 'center', lineHeight: '20px', height: 20 }}
++              >
++                <Text
++                  as="span"
++                  variant={TextVariant.bodyXs}
++                  color={TextColor.textAlternative}
++                >
++                  {heldCount}
++                </Text>
++              </Box>
++            );
++          })()}
++        </Box>
++        <Button
++          variant={ButtonVariant.Primary}
++          size={ButtonSize.Sm}
++          startIconName={IconName.Eye}
++          onClick={decryptAll}
++        >
++          Decrypt all
++        </Button>
++      </Box>
++
++      {(() => {
++        const allLoaded = NOX_CTOKENS.every((t) => {
++          const s = loads[t.address]?.status;
++          return s === 'ok' || s === 'error';
++        });
++        const held = NOX_CTOKENS.filter((t) => {
++          const l = loads[t.address];
++          return l?.status === 'ok' && !l.zero;
++        });
++
++        if (!allLoaded) {
++          return (
++            <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++              Scanning known ERC-7984 tokens on Arbitrum Sepolia…
++            </Text>
++          );
++        }
++        if (held.length === 0) {
++          return (
++            <Box
++              padding={4}
++              borderColor={BorderColor.borderMuted}
++              borderRadius={BorderRadius.LG}
++              display={Display.Flex}
++              flexDirection={FlexDirection.Column}
++              alignItems={AlignItems.center}
++              gap={3}
++              style={{ textAlign: 'center' }}
++            >
++              <Box
++                display={Display.Flex}
++                alignItems={AlignItems.center}
++                justifyContent={JustifyContent.center}
++                borderRadius={BorderRadius.full}
++                backgroundColor={BackgroundColor.backgroundMuted}
++                style={{ width: 48, height: 48 }}
++              >
++                <Icon name={IconName.Lock} size={IconSize.Lg} color={TextColor.iconAlternative} />
++              </Box>
++              <Text variant={TextVariant.bodyMdMedium}>
++                No confidential balances yet
++              </Text>
++              <Text variant={TextVariant.bodySm} color={TextColor.textAlternative}>
++                Scanned {NOX_CTOKENS.length} known ERC-7984 wrappers on Arbitrum
++                Sepolia. Use Shield above to wrap an ERC-20 into its
++                confidential equivalent.
++              </Text>
++            </Box>
++          );
++        }
++        return held.map((token) => (
++          <CTokenCard
++            key={token.address}
++            token={token}
++            ownerAddress={ownerAddress ?? ''}
++            networkClientId={networkClientId}
++            load={loads[token.address] ?? { status: 'idle' }}
++            reveal={reveals[token.address] ?? { status: 'hidden' }}
++            onReveal={() => void revealToken(token.address)}
++            onHide={() => hideToken(token.address)}
++            onBalanceChanged={() => setRefetchTick((n) => n + 1)}
++          />
++        ));
++      })()}
++
++      <ActivitySection activity={activity} />
++
++      <Box marginTop={4}>
++        <Text variant={TextVariant.bodyXs} color={TextColor.textMuted}>
++          Auto-discovered by scanning {NOX_CTOKENS.length} known ERC-7984
++          wrappers on Arbitrum Sepolia. Balances are end-to-end encrypted in
++          a Trusted Execution Environment; decryption is gasless — MetaMask
++          signs an EIP-712 authorization that the Nox Handle Gateway
++          verifies before returning the ciphertext. Powered by Nox Protocol.
++        </Text>
++      </Box>
++    </Box>
++  );
++}
++
++declare global {
++  // eslint-disable-next-line no-var
++  var platform: { openTab?: (args: { url: string }) => void } | undefined;
++}
+diff --git a/ui/components/multichain/account-overview/account-overview-eth.tsx b/ui/components/multichain/account-overview/account-overview-eth.tsx
+index 75795f9..db7fef4 100644
+--- a/ui/components/multichain/account-overview/account-overview-eth.tsx
++++ b/ui/components/multichain/account-overview/account-overview-eth.tsx
+@@ -12,6 +12,7 @@ export const AccountOverviewEth = (props: AccountOverviewEthProps) => {
+   return (
+     <AccountOverviewLayout
+       showTokens={true}
++      showPrivateBalance={true}
+       showNfts={true}
+       showDefi={defiPositionsEnabled}
+       showActivity={true}
+diff --git a/ui/components/multichain/account-overview/account-overview-tabs.tsx b/ui/components/multichain/account-overview/account-overview-tabs.tsx
+index b66beb3..c4ae8ce 100644
+--- a/ui/components/multichain/account-overview/account-overview-tabs.tsx
++++ b/ui/components/multichain/account-overview/account-overview-tabs.tsx
+@@ -30,6 +30,7 @@ import {
+ import AssetList from '../../app/assets/asset-list';
+ import DeFiTab from '../../app/assets/defi-list/defi-tab';
+ import NftsTab from '../../app/assets/nfts/nfts-tab';
++import PrivateBalanceTab from '../../app/assets/private-balance-tab';
+ import { PerpsView } from '../../app/perps/perps-view';
+ import { PerpsViewStreamBoundary } from '../../app/perps/perps-view-stream-boundary';
+ import { PerpsToastProvider } from '../../app/perps/perps-toast';
+@@ -46,6 +47,7 @@ export type AccountOverviewTabsProps = AccountOverviewCommonProps & {
+   showNfts: boolean;
+   showActivity: boolean;
+   showDefi?: boolean;
++  showPrivateBalance?: boolean;
+ };
+ 
+ export const AccountOverviewTabs = ({
+@@ -54,6 +56,7 @@ export const AccountOverviewTabs = ({
+   showNfts,
+   showActivity,
+   showDefi,
++  showPrivateBalance,
+ }: AccountOverviewTabsProps) => {
+   const persistedTab = useSelector(getDefaultHomeActiveTabName);
+   const [urlTab, setActiveTabKey] = useTabState();
+@@ -173,6 +176,18 @@ export const AccountOverviewTabs = ({
+         </Tab>
+       )}
+ 
++      {showPrivateBalance && (
++        <Tab
++          name="cTokens"
++          tabKey={AccountOverviewTabKey.PrivateBalance}
++          data-testid="account-overview__private-balance-tab"
++        >
++          <ErrorBoundary key="private-balance">
++            <PrivateBalanceTab />
++          </ErrorBoundary>
++        </Tab>
++      )}
++
+       {isPerpsExperienceAvailable && (
+         <Tab
+           name={t('perps')}
+diff --git a/ui/store/actions.ts b/ui/store/actions.ts
+index fd65d47..d0b1c63 100644
+--- a/ui/store/actions.ts
++++ b/ui/store/actions.ts
+@@ -8223,3 +8223,19 @@ export async function perpsToggleTestnet(): Promise<void> {
+     logErrorWithMessage(error);
+   }
+ }
++
++/**
++ * Nox — sign an EIP-712 typed-data payload from within the MetaMask UI,
++ * used by the Private Balance tab to authenticate decrypt requests to
++ * the Nox Handle Gateway without deep-linking to an external dApp.
++ */
++export async function noxSignTypedDataV4(
++  typedData: unknown,
++  from: string,
++): Promise<string> {
++  log.debug('background.noxSignTypedDataV4');
++  return await submitRequestToBackground<string>('noxSignTypedDataV4', [
++    typedData,
++    from,
++  ]);
 +}
